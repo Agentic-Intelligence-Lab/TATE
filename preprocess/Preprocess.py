@@ -77,6 +77,48 @@ def _safe_list(value):
     return value
 
 
+def _cfg_get(cfg: dict, *keys):
+    value = cfg
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _first_cfg_value(cfg: dict, paths):
+    for path in paths:
+        value = _cfg_get(cfg, *path)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _cfg_matrix(value, shape, name: str):
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.size == 0:
+        return None
+    if arr.shape != shape:
+        if arr.size == int(np.prod(shape)):
+            arr = arr.reshape(shape)
+        else:
+            raise ValueError(f"{name} must have shape {shape}, got {arr.shape}")
+    return arr
+
+
+def _cfg_vector(value, name: str):
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return None
+    if arr.size not in (4, 5, 8, 12, 14):
+        raise ValueError(f"{name} must contain OpenCV distortion coefficients, got length {arr.size}")
+    return arr
+
+
 class Preprocess:
     """Runs WiLoR hand reconstruction and exports HumanEgo-style hand products."""
 
@@ -117,8 +159,75 @@ class Preprocess:
             "AriaPhases_path",
             "./cfg/preprocess/base/AriaPhases.yaml",
         )
+        self.camera_calibration_cfg_path = _resolve_cfg_path(
+            self.master_cfg,
+            "CameraCalibration_path",
+            "./cfg/preprocess/base/RealSenseD405.yaml",
+        )
         self.aria_cam_cfg = load_cfg(self.aria_cam_cfg_path)
+        self.camera_calibration_cfg = _load_master_cfg(self.camera_calibration_cfg_path)
+        self.camera_calibration_meta = {
+            "path": self.camera_calibration_cfg_path,
+            "camera_model": self.camera_calibration_cfg.get("camera_model"),
+            "used_fields": [],
+            "fallback_fields": ["K", "d", "c2w"],
+        }
         self.has_vrs_input = False
+
+    def _camera_params_from_video_defaults(self, w: int, h: int):
+        focal = float(self.master_cfg.get("video_focal_px", 500.0))
+        k = np.array([[focal, 0.0, w / 2.0], [0.0, focal, h / 2.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+        d = np.zeros(8, dtype=np.float64)
+        c2w = np.eye(4, dtype=np.float64)
+        return k, d, c2w
+
+    def _load_video_camera_params(self, w: int, h: int):
+        k, d, c2w = self._camera_params_from_video_defaults(w, h)
+        cfg = self.camera_calibration_cfg or {}
+        used_fields = []
+
+        if not cfg:
+            self.camera_calibration_meta["used_fields"] = used_fields
+            print("[Camera] No calibration YAML loaded; using video default intrinsics/extrinsics.")
+            return k, d, c2w
+
+        calib_w = _cfg_get(cfg, "resolution", "width")
+        calib_h = _cfg_get(cfg, "resolution", "height")
+        if calib_w and calib_h and (int(calib_w) != w or int(calib_h) != h):
+            print(f"[Warn] Calibration resolution {calib_w}x{calib_h} does not match video {w}x{h}.")
+
+        k_cfg = _cfg_matrix(
+            _first_cfg_value(cfg, [("intrinsics", "K"), ("intrinsics", "k"), ("K",), ("k",)]),
+            (3, 3),
+            "camera intrinsics K",
+        )
+        d_cfg = _cfg_vector(
+            _first_cfg_value(cfg, [("intrinsics", "d"), ("intrinsics", "D"), ("d",), ("D",)]),
+            "camera distortion d",
+        )
+        c2w_cfg = _cfg_matrix(
+            _first_cfg_value(cfg, [("extrinsics", "c2w"), ("c2w",)]),
+            (4, 4),
+            "camera extrinsics c2w",
+        )
+
+        if k_cfg is not None:
+            k = k_cfg
+            used_fields.append("K")
+        if d_cfg is not None:
+            d = d_cfg
+            used_fields.append("d")
+        if c2w_cfg is not None:
+            c2w = c2w_cfg
+            used_fields.append("c2w")
+
+        self.camera_calibration_meta["used_fields"] = used_fields
+        self.camera_calibration_meta["fallback_fields"] = [name for name in ("K", "d", "c2w") if name not in used_fields]
+        if used_fields:
+            print(f"[Camera] Using calibration fields from {self.camera_calibration_cfg_path}: {', '.join(used_fields)}")
+        else:
+            print(f"[Camera] Calibration YAML has no numeric K/d/c2w yet; using video defaults.")
+        return k, d, c2w
 
     def _build_aria_cam_from_video(self, video_path: str) -> AriaCam:
         self.has_vrs_input = False
@@ -130,12 +239,7 @@ class Preprocess:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # Plain mp4 input has no Project Aria calibration sidecar. Use a pinhole
-        # approximation so WiLoR EEF projection can run end to end.
-        focal = float(self.master_cfg.get("video_focal_px", 500.0))
-        k = np.array([[focal, 0.0, w / 2.0], [0.0, focal, h / 2.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-        d = np.zeros(8, dtype=np.float64)
-        c2w = np.eye(4, dtype=np.float64)
+        k, d, c2w = self._load_video_camera_params(w, h)
 
         aria_cam = AriaCam(mps_path=self.mps_path)
         aria_cam.fps = fps
@@ -164,7 +268,7 @@ class Preprocess:
                     d=d,
                     c2w=c2w,
                     c2d=np.eye(4, dtype=np.float64),
-                    d2w=np.eye(4, dtype=np.float64),
+                    d2w=c2w,
                 )
             )
             idx += 1
@@ -259,6 +363,8 @@ class Preprocess:
             "width": int(aria_cam.w),
             "k": _safe_list(aria_cam.k),
             "d": _safe_list(aria_cam.d),
+            "c2w": _safe_list(aria_cam.cam[0].c2w) if aria_cam.cam else None,
+            "camera_calibration": self.camera_calibration_meta,
             "frames": frames,
         }
         with open(save_path, "w", encoding="utf-8") as f:
@@ -332,7 +438,7 @@ class Preprocess:
         print(f"[Input] Loaded {len(aria_cam.cam)} frames ({aria_cam.w}x{aria_cam.h}, {float(aria_cam.fps):.3f} FPS)")
 
         # The original WiLoR generator also writes analysis PNGs. Disable that
-        # side effect here so this command writes only the three requested artifacts.
+        # side effect here so this command writes only the requested artifacts.
         WiLoRHandsModule.AriaHandsOps.save_hands_analysis_plots_two = staticmethod(lambda *args, **kwargs: None)
 
         generator = WiLoRHandsGenerator(self.mps_path, self.aria_hands_cfg_path, aria_cam)

@@ -1,0 +1,45 @@
+# RealSense D405 camera calibration.
+# Fill these values for the exact device and video resolution used by --video_path.
+
+camera_model: "RealSense D405"
+
+resolution:
+  width: 640
+  height: 480
+
+intrinsics:
+  # 3x3 camera intrinsic matrix, e.g. [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+  K:
+    - [393.030548, 0.0, 312.918335]
+    - [0.0, 392.679291, 240.937149]
+    - [0.0, 0.0, 1.0]
+  # Distortion coefficients accepted by OpenCV projectPoints, e.g. [k1, k2, p1, p2, k3]
+  distortion_model: "inverse_brown_conrady"
+  d: [-0.05060414, 0.05627556, 0.00079493, 0.00094071, -0.01816789]
+
+extrinsics:
+  # 4x4 camera-to-world transform used for EEF world coordinates.
+  # Source field: T_cam_in_base. Here base is treated as the world frame.
+  c2w:
+    - [0.0, 0.70710678, 0.70710678, 0.09618637]
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.70710678, -0.70710678, 0.26534744]
+    - [0.0, 0.0, 0.0, 1.0]
+  camera_height_m: 0.3503474360704422
+  pitch_down_deg: 45.0
+  optical_projection_base: [1.0, 0.0, 0.0]
+  camera_target_base: [0.44653381, 0.0, -0.085]
+
+extra_transforms:
+  T_hand_to_ee:
+    - [-1.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  T_ee_axis_correct:
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, -1.0, 0.0, 0.0]
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+
+notes: "Primary ARX AC one HumanEgo cell using the built-in HEAD camera."

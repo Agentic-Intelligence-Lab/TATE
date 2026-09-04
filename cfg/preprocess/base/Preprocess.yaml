@@ -12,6 +12,7 @@ AriaHands_path: "./cfg/preprocess/base/AriaHands.yaml"
 AriaMPS_path: "./cfg/preprocess/base/AriaMPS.yaml"
 AriaPhases_path: "./cfg/preprocess/base/AriaPhases.yaml"
 AriaSlam_path: "./cfg/preprocess/base/AriaSlam.yaml"
+CameraCalibration_path: "./cfg/preprocess/base/RealSenseD405.yaml"
 
 DINOSAM_path: "./cfg/preprocess/base/DINOSAM.yaml"
 KptsSelector_path: "./cfg/preprocess/base/KptsSelector.yaml"

@@ -37,6 +37,14 @@ SIDE_SPECS = {
     },
 }
 GRIPPER_OPEN_WIDTH_M = 0.088
+HAND_TO_TCP_ROT = np.asarray(
+    [
+        [0.0, 0.0, -1.0],
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
 
 mujoco = None
 
@@ -116,6 +124,12 @@ def se3_from_matrix(mink, pose: np.ndarray):
         rotation=mink.SO3.from_matrix(pose[:3, :3]),
         translation=pose[:3, 3],
     )
+
+
+def hand_pose_to_tcp_pose(hand_pose: np.ndarray) -> np.ndarray:
+    tcp_pose = np.asarray(hand_pose, dtype=np.float64).copy()
+    tcp_pose[:3, :3] = tcp_pose[:3, :3] @ HAND_TO_TCP_ROT
+    return tcp_pose
 
 
 def set_gripper(data, spec: dict[str, Any], gripper_addrs: np.ndarray, act_ids: dict[str, int], grasp: int) -> np.ndarray:
@@ -300,7 +314,7 @@ def solve_side(
                 q_base=q_base,
                 q_seed=q_warm,
                 q_ref=q_warm,
-                target_pose=side_targets["pose"][i],
+                target_pose=hand_pose_to_tcp_pose(side_targets["pose"][i]),
                 arm_addrs=arm_addrs,
                 gripper_addrs=gripper_addrs,
                 active_dofs=active_dofs,

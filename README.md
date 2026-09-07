@@ -68,3 +68,22 @@ Notes:
 
 - Joint npz replay moves both arms when `left_joint_qpos` and `right_joint_qpos` are present.
 - Parquet joint replay reads left arm from dims `0:7` and right arm from dims `7:14`.
+
+## Real Robot Replay
+
+Dry-run validates ranges and interpolated command speed only. Real execution requires both risk flags.
+
+```bash
+python real2sim/replay_arx_realbot.py \
+  --data outputs/test/ik/dual_arm_ik_mink.npz  # dry-run IK joint replay
+
+python real2sim/replay_arx_realbot.py \
+  --data DATA/arx_ego_dataset/data/chunk-000/file-000.parquet  # dry-run real robot log replay
+
+python real2sim/replay_arx_realbot.py \
+  --data outputs/test/ik/dual_arm_ik_mink.npz \
+  --execute \
+  --yes-i-understand-risk  # commands real robot; keep E-stop/power cutoff ready
+```
+
+The ARX SDK under `/home/ymq/code/ARX5_beta` must match the Python interpreter used for real execution.

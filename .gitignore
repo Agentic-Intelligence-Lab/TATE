@@ -222,3 +222,4 @@ outputs/
 thirdparty/
 DATA/
 assets/
+.vscode/

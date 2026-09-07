@@ -2,8 +2,8 @@
 """Replay ARX trajectories in MuJoCo.
 
 Modes:
-  eef   - replay right-hand EEF as a mocap marker; robot stays still.
-  joint - replay right-arm joint qpos; robot moves.
+  eef   - replay left/right EEF trajectories as markers; robot stays still.
+  joint - replay right-arm joint qpos from ARX parquet data; robot moves.
 
 If --data is omitted, the script only shows/renders the static ARX scene.
 """
@@ -30,6 +30,22 @@ WIDTH = 1280
 HEIGHT = 720
 RIGHT_ARM_JOINTS = tuple(f"right_joint{i}" for i in range(11, 17))
 RIGHT_GRIPPER_JOINTS = ("right_joint17", "right_joint18")
+ARX_RIGHT_SLICE = slice(7, 14)
+SIM_GRIPPER_MAX_M = 0.088
+REAL_GRIPPER_CLOSED = -3.4
+REAL_GRIPPER_OPEN = 0.1
+EEF_STYLES = {
+    "right": {
+        "label": "right",
+        "rgba": (0.05, 0.75, 1.0, 0.78),
+        "sphere_rgba": (0.05, 0.75, 1.0, 1.0),
+    },
+    "left": {
+        "label": "left",
+        "rgba": (1.0, 0.20, 0.90, 0.78),
+        "sphere_rgba": (1.0, 0.20, 0.90, 1.0),
+    },
+}
 
 cv2 = None
 mujoco = None
@@ -77,22 +93,55 @@ def pose_to_pos_quat_xyzw(pose: Any) -> tuple[np.ndarray, np.ndarray]:
     return pos, quat
 
 
-def load_eef_json(path: Path) -> dict[str, np.ndarray]:
+def _nan_pose_sequence(n: int) -> np.ndarray:
+    return np.full((n, 4, 4), np.nan, dtype=np.float64)
+
+
+def _arm_display_transforms(data: dict[str, Any]) -> dict[str, np.ndarray]:
+    identity = np.eye(4, dtype=np.float64)
+    transforms = {"right": identity, "left": identity}
+    arm_c2w = data.get("arm_camera_c2w") or {}
+    if not isinstance(arm_c2w, dict) or "right" not in arm_c2w or "left" not in arm_c2w:
+        return transforms
+
+    right_c2w = np.asarray(arm_c2w["right"], dtype=np.float64)
+    left_c2w = np.asarray(arm_c2w["left"], dtype=np.float64)
+    if right_c2w.shape != (4, 4) or left_c2w.shape != (4, 4):
+        return transforms
+
+    right_to_left = left_c2w @ np.linalg.inv(right_c2w)
+    transforms["left"] = np.linalg.inv(right_to_left)
+    return transforms
+
+
+def load_eef_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    times, pos, quat, grasp = [], [], [], []
 
     if "frames" in data:
-        for i, frame in enumerate(data["frames"]):
-            hand = frame.get("hand_r")
-            if not hand or hand.get("eef_pose_world") is None:
-                continue
-            p, q = pose_to_pos_quat_xyzw(hand["eef_pose_world"])
+        frames = data["frames"]
+        n = len(frames)
+        times = np.zeros(n, dtype=np.float64)
+        hands = {
+            "right": {"pose": _nan_pose_sequence(n), "valid": np.zeros(n, dtype=bool), "grasp": np.zeros(n, dtype=np.int32)},
+            "left": {"pose": _nan_pose_sequence(n), "valid": np.zeros(n, dtype=bool), "grasp": np.zeros(n, dtype=np.int32)},
+        }
+        display_tf = _arm_display_transforms(data)
+
+        for i, frame in enumerate(frames):
             stamp = frame.get("ts")
-            times.append(float(stamp) * 1e-9 if stamp is not None else i / FPS)
-            pos.append(p)
-            quat.append(q)
-            grasp.append(int(hand.get("grasp_state", 0)))
+            times[i] = float(stamp) * 1e-9 if stamp is not None else i / FPS
+            for side, key in (("right", "hand_r"), ("left", "hand_l")):
+                hand = frame.get(key)
+                if not hand or hand.get("eef_pose_world") is None:
+                    continue
+                pose = np.asarray(hand["eef_pose_world"], dtype=np.float64)
+                if pose.shape != (4, 4):
+                    continue
+                hands[side]["pose"][i] = display_tf[side] @ pose
+                hands[side]["valid"][i] = True
+                hands[side]["grasp"][i] = int(hand.get("grasp_state", 0))
     elif "records" in data:
+        times, poses, grasp = [], [], []
         for i, rec in enumerate(data["records"]):
             if not rec.get("valid", True):
                 continue
@@ -101,23 +150,35 @@ def load_eef_json(path: Path) -> dict[str, np.ndarray]:
                 continue
             stamp = rec.get("ts")
             times.append(float(stamp) * 1e-9 if stamp is not None else i / FPS)
-            pos.append(np.asarray(ee["translation_m"], dtype=np.float64))
-            quat.append(np.asarray(ee["quat_xyzw"], dtype=np.float64))
+            pose = np.eye(4, dtype=np.float64)
+            pose[:3, :3] = R.from_quat(ee["quat_xyzw"]).as_matrix()
+            pose[:3, 3] = np.asarray(ee["translation_m"], dtype=np.float64)
+            poses.append(pose)
             grasp.append(int(rec.get("grasp", 0)))
+        n = len(poses)
+        hands = {
+            "right": {"pose": np.asarray(poses, dtype=np.float64), "valid": np.ones(n, dtype=bool), "grasp": np.asarray(grasp, dtype=np.int32)},
+            "left": {"pose": _nan_pose_sequence(n), "valid": np.zeros(n, dtype=bool), "grasp": np.zeros(n, dtype=np.int32)},
+        }
+        times = np.asarray(times, dtype=np.float64)
     else:
         raise RuntimeError(f"Unsupported EEF JSON format: {path}")
 
-    if not pos:
-        raise RuntimeError(f"No right-hand EEF data found in {path}")
+    if not (hands["right"]["valid"].any() or hands["left"]["valid"].any()):
+        raise RuntimeError(f"No left/right EEF data found in {path}")
 
     t = np.asarray(times, dtype=np.float64)
     t -= t[0]
-    return {
-        "time_s": t,
-        "pos": np.asarray(pos, dtype=np.float64),
-        "quat_xyzw": np.asarray(quat, dtype=np.float64),
-        "grasp": np.asarray(grasp, dtype=np.int32),
-    }
+    for side in ("right", "left"):
+        pose = hands[side]["pose"]
+        hands[side]["pos"] = pose[:, :3, 3]
+        quat = np.full((len(t), 4), np.nan, dtype=np.float64)
+        for i, valid in enumerate(hands[side]["valid"]):
+            if valid:
+                quat[i] = R.from_matrix(pose[i, :3, :3]).as_quat()
+        hands[side]["quat_xyzw"] = quat
+
+    return {"time_s": t, "hands": hands, "display_frame": "right_arm_base"}
 
 
 def _first_npz_key(data: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray | None:
@@ -125,6 +186,16 @@ def _first_npz_key(data: dict[str, np.ndarray], names: tuple[str, ...]) -> np.nd
         if name in data:
             return np.asarray(data[name], dtype=np.float64)
     return None
+
+
+def gripper_scalar_to_qpos(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if np.nanmin(values) < -0.1 or np.nanmax(values) > SIM_GRIPPER_MAX_M:
+        width = (values - REAL_GRIPPER_CLOSED) / (REAL_GRIPPER_OPEN - REAL_GRIPPER_CLOSED)
+        width = np.clip(width, 0.0, 1.0) * SIM_GRIPPER_MAX_M
+    else:
+        width = np.clip(values, 0.0, SIM_GRIPPER_MAX_M)
+    return np.column_stack([0.5 * width, 0.5 * width])
 
 
 def load_joint_npz(path: Path) -> dict[str, np.ndarray]:
@@ -151,19 +222,56 @@ def load_joint_npz(path: Path) -> dict[str, np.ndarray]:
     if q.shape[1] >= len(RIGHT_ARM_JOINTS) + 2:
         out["gripper_qpos"] = q[:, len(RIGHT_ARM_JOINTS) : len(RIGHT_ARM_JOINTS) + 2]
     elif q.shape[1] >= len(RIGHT_ARM_JOINTS) + 1:
-        width = np.clip(q[:, len(RIGHT_ARM_JOINTS)], 0.0, 0.088)
-        out["gripper_qpos"] = np.column_stack([0.5 * width, 0.5 * width])
+        out["gripper_qpos"] = gripper_scalar_to_qpos(q[:, len(RIGHT_ARM_JOINTS)])
     elif "gripper_width_m" in data:
-        width = np.clip(np.asarray(data["gripper_width_m"], dtype=np.float64).reshape(-1), 0.0, 0.088)
-        out["gripper_qpos"] = np.column_stack([0.5 * width, 0.5 * width])
+        out["gripper_qpos"] = gripper_scalar_to_qpos(data["gripper_width_m"])
     elif "grasp" in data:
         grasp = np.asarray(data["grasp"], dtype=np.int32).reshape(-1)
-        width = np.where(grasp > 0, 0.0, 0.088)
+        width = np.where(grasp > 0, 0.0, SIM_GRIPPER_MAX_M)
         out["gripper_qpos"] = np.column_stack([0.5 * width, 0.5 * width])
 
     if len(out["time_s"]) != n:
         raise RuntimeError(f"time_s length {len(out['time_s'])} does not match qpos length {n}")
     return out
+
+
+def load_joint_parquet(path: Path) -> dict[str, np.ndarray]:
+    import pandas as pd
+
+    df = pd.read_parquet(path)
+    source_col = "observation.state" if "observation.state" in df.columns else "action"
+    if source_col not in df.columns:
+        raise RuntimeError(f"Parquet joint replay requires observation.state or action in {path}")
+
+    state = np.stack(df[source_col].to_numpy()).astype(np.float64)
+    if state.ndim != 2 or state.shape[1] < ARX_RIGHT_SLICE.stop:
+        raise RuntimeError(f"{source_col} must contain at least 14 values with right-arm data, got {state.shape}")
+
+    right = state[:, ARX_RIGHT_SLICE]
+    n = len(right)
+    if "timestamp" in df.columns:
+        t = df["timestamp"].to_numpy(dtype=np.float64)
+        t -= t[0]
+    else:
+        t = np.arange(n, dtype=np.float64) / FPS
+
+    return {
+        "time_s": t,
+        "arm_qpos": right[:, : len(RIGHT_ARM_JOINTS)],
+        "gripper_qpos": gripper_scalar_to_qpos(right[:, len(RIGHT_ARM_JOINTS)]),
+        "target_pos": None,
+        "target_quat_xyzw": None,
+        "pos_err_m": np.full(n, np.nan, dtype=np.float64),
+        "ang_err_deg": np.full(n, np.nan, dtype=np.float64),
+    }
+
+
+def load_joint_data(path: Path) -> dict[str, np.ndarray]:
+    if path.suffix.lower() == ".npz":
+        return load_joint_npz(path)
+    if path.suffix.lower() == ".parquet":
+        return load_joint_parquet(path)
+    raise RuntimeError(f"Unsupported joint data format: {path.suffix}; expected .parquet or .npz")
 
 
 def qpos_addrs(model, names: tuple[str, ...]) -> np.ndarray:
@@ -202,7 +310,7 @@ def make_camera():
     cam.type = mj.mjtCamera.mjCAMERA_FREE
     cam.lookat[:] = [0.24, -0.02, 0.22]
     cam.distance = 1.15
-    cam.azimuth = 145.0
+    cam.azimuth = -35.0
     cam.elevation = -28.0
     return cam
 
@@ -224,6 +332,13 @@ def set_marker(data, marker_mid: int | None, pos: np.ndarray, quat_xyzw: np.ndar
         return
     data.mocap_pos[marker_mid] = np.asarray(pos, dtype=np.float64)
     data.mocap_quat[marker_mid] = quat_xyzw_to_wxyz(np.asarray(quat_xyzw, dtype=np.float64))
+
+
+def hide_marker(data, marker_mid: int | None) -> None:
+    if marker_mid is None:
+        return
+    data.mocap_pos[marker_mid] = np.asarray([0.0, 0.0, -10.0], dtype=np.float64)
+    data.mocap_quat[marker_mid] = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
 
 def apply_joint_frame(data, arm_addrs, gripper_addrs, acts, frame: dict[str, Any]) -> None:
@@ -263,16 +378,75 @@ def _add_capsule(scn, mj, p0, p1, rgba, radius: float) -> None:
     scn.ngeom += 1
 
 
-def draw_path(scn, points, stride: int = 2) -> None:
+def _add_sphere(scn, mj, pos, rgba, radius: float) -> None:
+    if scn.ngeom >= scn.maxgeom:
+        return
+    geom = scn.geoms[scn.ngeom]
+    mj.mjv_initGeom(
+        geom,
+        mj.mjtGeom.mjGEOM_SPHERE,
+        np.asarray([radius, 0.0, 0.0], dtype=np.float64),
+        np.asarray(pos, dtype=np.float64),
+        np.zeros(9, dtype=np.float64),
+        np.asarray(rgba, dtype=np.float32),
+    )
+    geom.category = mj.mjtCatBit.mjCAT_DECOR
+    scn.ngeom += 1
+
+
+def draw_path(scn, points, valid=None, rgba=(0.05, 0.75, 1.0, 0.70), stride: int = 2) -> None:
     _, mj = require_runtime()
     pts = np.asarray(points, dtype=np.float64)
     if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
+        return
+    if valid is None:
+        valid = np.isfinite(pts).all(axis=1)
+    pts = pts[np.asarray(valid, dtype=bool)]
+    if len(pts) < 2:
         return
     sampled = pts[:: max(stride, 1)]
     if not np.allclose(sampled[-1], pts[-1]):
         sampled = np.vstack([sampled, pts[-1]])
     for p0, p1 in zip(sampled[:-1], sampled[1:]):
-        _add_capsule(scn, mj, p0, p1, (0.05, 0.75, 1.0, 0.70), 0.004)
+        _add_capsule(scn, mj, p0, p1, rgba, 0.004)
+
+
+def draw_eef_marker(scn, pose, rgba, radius: float = 0.018) -> None:
+    _, mj = require_runtime()
+    pose = np.asarray(pose, dtype=np.float64)
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        return
+    origin = pose[:3, 3]
+    rot = pose[:3, :3]
+    _add_sphere(scn, mj, origin, rgba, radius)
+    axis_rgba = (
+        (1.0, 0.05, 0.05, 1.0),
+        (0.05, 0.8, 0.1, 1.0),
+        (0.1, 0.3, 1.0, 1.0),
+    )
+    for axis_i, axis_color in enumerate(axis_rgba):
+        _add_capsule(scn, mj, origin, origin + rot[:, axis_i] * 0.075, axis_color, 0.004)
+
+
+def draw_eef_replay(scn, replay: dict[str, Any], i: int) -> None:
+    for side in ("right", "left"):
+        hand = replay["hands"][side]
+        style = EEF_STYLES[side]
+        draw_path(scn, hand["pos"], hand["valid"], rgba=style["rgba"])
+        if hand["valid"][i]:
+            draw_eef_marker(scn, hand["pose"][i], style["sphere_rgba"])
+
+
+def eef_info(replay: dict[str, Any], i: int) -> str:
+    chunks = []
+    for side in ("right", "left"):
+        hand = replay["hands"][side]
+        if hand["valid"][i]:
+            pos = hand["pos"][i]
+            chunks.append(f"{side[0].upper()} {pos[0]:+.3f},{pos[1]:+.3f},{pos[2]:+.3f}")
+        else:
+            chunks.append(f"{side[0].upper()} n/a")
+    return f"cyan=right magenta=left frame={replay.get('display_frame', 'scene')}  " + "  ".join(chunks)
 
 
 def draw_hud(frame_rgb: np.ndarray, mode: str, i: int, n: int, info: str) -> np.ndarray:
@@ -323,16 +497,17 @@ def launch_viewer(args, replay: dict[str, np.ndarray] | None) -> None:
             with viewer.lock():
                 if args.mode == "eef":
                     data.time = float(replay["time_s"][i])
-                    set_marker(data, marker_mid, replay["pos"][i], replay["quat_xyzw"][i])
+                    hide_marker(data, marker_mid)
                     viewer.user_scn.ngeom = 0
-                    draw_path(viewer.user_scn, replay["pos"])
+                    draw_eef_replay(viewer.user_scn, replay, i)
                 else:
                     frame = {k: v[i] for k, v in replay.items() if isinstance(v, np.ndarray) and len(v) == len(replay["time_s"])}
                     apply_joint_frame(data, arm_addrs, gripper_addrs, acts, frame)
                     if replay["target_pos"] is not None and replay["target_quat_xyzw"] is not None:
                         set_marker(data, marker_mid, replay["target_pos"][i], replay["target_quat_xyzw"][i])
                 mj.mj_forward(model, data)
-            viewer.set_texts((None, None, f"ARX {args.mode} replay\n{i + 1}/{len(replay['time_s'])}", "right arm data"))
+            detail = eef_info(replay, i) if args.mode == "eef" else "right arm data"
+            viewer.set_texts((None, None, f"ARX {args.mode} replay\n{i + 1}/{len(replay['time_s'])}", detail))
             viewer.sync()
             i = 0 if i == len(replay["time_s"]) - 1 else i + 1
             time.sleep(1.0 / FPS)
@@ -363,8 +538,8 @@ def render_mp4(args, replay: dict[str, np.ndarray] | None) -> None:
                 info = "static scene; no replay data"
             elif args.mode == "eef":
                 data.time = float(replay["time_s"][i])
-                set_marker(data, marker_mid, replay["pos"][i], replay["quat_xyzw"][i])
-                info = f"EEF target in robot base: {replay['pos'][i]}"
+                hide_marker(data, marker_mid)
+                info = eef_info(replay, i)
             else:
                 frame = {k: v[i] for k, v in replay.items() if isinstance(v, np.ndarray) and len(v) == len(replay["time_s"])}
                 apply_joint_frame(data, arm_addrs, gripper_addrs, acts, frame)
@@ -374,7 +549,7 @@ def render_mp4(args, replay: dict[str, np.ndarray] | None) -> None:
             mj.mj_forward(model, data)
             renderer.update_scene(data, camera=camera)
             if replay is not None and args.mode == "eef" and hasattr(renderer, "scene"):
-                draw_path(renderer.scene, replay["pos"])
+                draw_eef_replay(renderer.scene, replay, i)
             writer.write(draw_hud(renderer.render(), args.mode, i, n, info))
     finally:
         writer.release()
@@ -391,14 +566,14 @@ def load_replay(mode: str, data_path: str | None) -> dict[str, np.ndarray] | Non
     if mode == "eef":
         return load_eef_json(path)
     if mode == "joint":
-        return load_joint_npz(path)
+        return load_joint_data(path)
     raise ValueError(f"unsupported mode: {mode}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Replay ARX EEF or joint trajectories in MuJoCo")
     parser.add_argument("--mode", choices=("eef", "joint"), default="eef")
-    parser.add_argument("--data", default=None, help="EEF JSON for eef mode, or joint NPZ for joint mode")
+    parser.add_argument("--data", default=None, help="EEF JSON for eef mode, or ARX parquet for joint mode")
     parser.add_argument("--out", default=None, help="Output mp4 path when --viewer is not set")
     parser.add_argument("--viewer", action="store_true", help="Open interactive viewer instead of rendering mp4")
     args = parser.parse_args()

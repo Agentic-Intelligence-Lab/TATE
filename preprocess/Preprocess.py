@@ -172,6 +172,8 @@ class Preprocess:
             "used_fields": [],
             "fallback_fields": ["K", "d", "c2w"],
         }
+        self.arm_camera_c2w = {"right": None, "left": None}
+        self.arm_frame_names = {"right": "right_arm_base", "left": "left_arm_base"}
         self.has_vrs_input = False
 
     def _camera_params_from_video_defaults(self, w: int, h: int):
@@ -221,6 +223,7 @@ class Preprocess:
             c2w = c2w_cfg
             used_fields.append("c2w")
 
+        self._load_arm_camera_extrinsics(c2w)
         self.camera_calibration_meta["used_fields"] = used_fields
         self.camera_calibration_meta["fallback_fields"] = [name for name in ("K", "d", "c2w") if name not in used_fields]
         if used_fields:
@@ -228,6 +231,40 @@ class Preprocess:
         else:
             print(f"[Camera] Calibration YAML has no numeric K/d/c2w yet; using video defaults.")
         return k, d, c2w
+
+    def _load_arm_camera_extrinsics(self, default_c2w: np.ndarray) -> None:
+        cfg = self.camera_calibration_cfg or {}
+        arm_cfg = cfg.get("arm_extrinsics") if isinstance(cfg, dict) else {}
+        used = []
+
+        right_c2w = _cfg_matrix(
+            _first_cfg_value(
+                arm_cfg or {},
+                [("right", "T_cam_in_right_arm_base"), ("right", "c2w")],
+            ),
+            (4, 4),
+            "right arm camera extrinsics",
+        )
+        left_c2w = _cfg_matrix(
+            _first_cfg_value(
+                arm_cfg or {},
+                [("left", "T_cam_in_left_arm_base"), ("left", "c2w")],
+            ),
+            (4, 4),
+            "left arm camera extrinsics",
+        )
+
+        if right_c2w is None:
+            right_c2w = default_c2w
+        else:
+            used.append("right")
+        if left_c2w is None:
+            left_c2w = default_c2w
+        else:
+            used.append("left")
+
+        self.arm_camera_c2w = {"right": right_c2w, "left": left_c2w}
+        self.camera_calibration_meta["arm_extrinsics_used"] = used
 
     def _build_aria_cam_from_video(self, video_path: str) -> AriaCam:
         self.has_vrs_input = False
@@ -316,27 +353,54 @@ class Preprocess:
             return self._build_aria_cam_from_vrs()
         raise RuntimeError("Provide --video_path for mp4 input, or set --mps_path to a folder containing sample.vrs.")
 
+    def _arm_c2w_for_hand(self, is_right: bool, default_c2w: np.ndarray) -> np.ndarray:
+        side = "right" if is_right else "left"
+        return self.arm_camera_c2w.get(side) if self.arm_camera_c2w.get(side) is not None else default_c2w
+
     @staticmethod
-    def _hand_to_eef_json(hand, c2w):
+    def _pose_from_processing_world(pose, processing_c2w, output_c2w):
+        if pose is None:
+            return None
+        pose_cam = np.linalg.inv(processing_c2w) @ pose
+        return output_c2w @ pose_cam
+
+    @staticmethod
+    def _point_from_processing_world(point, processing_c2w, output_c2w):
+        if point is None:
+            return None
+        p = np.asarray(point, dtype=np.float64).reshape(3)
+        p_h = np.ones(4, dtype=np.float64)
+        p_h[:3] = p
+        return (output_c2w @ (np.linalg.inv(processing_c2w) @ p_h))[:3]
+
+    @staticmethod
+    def _vec_from_processing_world(vec, processing_c2w, output_c2w):
+        if vec is None:
+            return None
+        v = np.asarray(vec, dtype=np.float64).reshape(3)
+        return output_c2w[:3, :3] @ (processing_c2w[:3, :3].T @ v)
+
+    def _hand_to_eef_json(self, hand, processing_c2w, output_c2w):
         if hand is None or hand.midpoint_pose_opt_world is None:
             return None
-        w2c = np.linalg.inv(c2w)
-        eef_pose_world = hand.midpoint_pose_opt_world
-        eef_pose_cam = w2c @ eef_pose_world
+        is_right = bool(hand.is_right)
+        eef_pose_cam = np.linalg.inv(processing_c2w) @ hand.midpoint_pose_opt_world
+        eef_pose_world = output_c2w @ eef_pose_cam
         return {
-            "is_right": bool(hand.is_right),
+            "is_right": is_right,
+            "eef_frame": self.arm_frame_names["right" if is_right else "left"],
             "confidence": _safe_list(hand.confidence),
             "grasp_state": int(hand.grasp_state),
             "eef_pose_world": _safe_list(eef_pose_world),
             "eef_pose_cam": _safe_list(eef_pose_cam),
-            "eef_translation_world": _safe_list(hand.midpoint_translation_opt_world),
-            "eef_linear_velocity_world": _safe_list(hand.midpoint_lin_vel_opt_world),
-            "eef_angular_velocity_world": _safe_list(hand.midpoint_ang_vel_opt_world),
-            "wrist_pose_world": _safe_list(hand.wrist_pose_opt_world),
-            "thumb_translation_world": _safe_list(hand.thumb_translation_opt_world),
-            "index_translation_world": _safe_list(hand.index_translation_opt_world),
-            "thumb_base_world": _safe_list(hand.thumb_base_opt_world),
-            "index_base_world": _safe_list(hand.index_base_opt_world),
+            "eef_translation_world": _safe_list(self._point_from_processing_world(hand.midpoint_translation_opt_world, processing_c2w, output_c2w)),
+            "eef_linear_velocity_world": _safe_list(self._vec_from_processing_world(hand.midpoint_lin_vel_opt_world, processing_c2w, output_c2w)),
+            "eef_angular_velocity_world": _safe_list(self._vec_from_processing_world(hand.midpoint_ang_vel_opt_world, processing_c2w, output_c2w)),
+            "wrist_pose_world": _safe_list(self._pose_from_processing_world(hand.wrist_pose_opt_world, processing_c2w, output_c2w)),
+            "thumb_translation_world": _safe_list(self._point_from_processing_world(hand.thumb_translation_opt_world, processing_c2w, output_c2w)),
+            "index_translation_world": _safe_list(self._point_from_processing_world(hand.index_translation_opt_world, processing_c2w, output_c2w)),
+            "thumb_base_world": _safe_list(self._point_from_processing_world(hand.thumb_base_opt_world, processing_c2w, output_c2w)),
+            "index_base_world": _safe_list(self._point_from_processing_world(hand.index_base_opt_world, processing_c2w, output_c2w)),
             "distance_midpoint2wrist": _safe_list(hand.distance_midpoint2wrist_opt_world),
         }
 
@@ -344,12 +408,14 @@ class Preprocess:
         frames = []
         for idx, cam_d in enumerate(aria_cam.cam):
             data = aria_hands.hands[idx]
+            right_c2w = self._arm_c2w_for_hand(True, cam_d.c2w)
+            left_c2w = self._arm_c2w_for_hand(False, cam_d.c2w)
             frames.append(
                 {
                     "idx": int(cam_d.idx),
                     "ts": int(cam_d.ts),
-                    "hand_r": self._hand_to_eef_json(data.hand_r, cam_d.c2w),
-                    "hand_l": self._hand_to_eef_json(data.hand_l, cam_d.c2w),
+                    "hand_r": self._hand_to_eef_json(data.hand_r, cam_d.c2w, right_c2w),
+                    "hand_l": self._hand_to_eef_json(data.hand_l, cam_d.c2w, left_c2w),
                 }
             )
 
@@ -364,6 +430,7 @@ class Preprocess:
             "k": _safe_list(aria_cam.k),
             "d": _safe_list(aria_cam.d),
             "c2w": _safe_list(aria_cam.cam[0].c2w) if aria_cam.cam else None,
+            "arm_camera_c2w": {side: _safe_list(value) for side, value in self.arm_camera_c2w.items()},
             "camera_calibration": self.camera_calibration_meta,
             "frames": frames,
         }

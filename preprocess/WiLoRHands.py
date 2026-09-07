@@ -250,10 +250,11 @@ class WiLoRHandsGenerator:
                 if wilor_preds is None:
                     continue  # detection without estimation (no hand inside bbox)
 
-                is_right_hand = bool(det.get("is_right", 1.0) >= 0.5)
+                raw_is_right_hand = bool(det.get("is_right", 1.0) >= 0.5)
+                is_right_hand = not raw_is_right_hand if getattr(self.cfg, "swap_handedness", False) else raw_is_right_hand
                 # Use YOLO detection score as primary confidence source
                 yolo_det_conf = _cls_best_conf.get(
-                    1 if is_right_hand else 0, None
+                    1 if raw_is_right_hand else 0, None
                 )
 
                 # Shape: (1, 21, 2) → (21, 2)

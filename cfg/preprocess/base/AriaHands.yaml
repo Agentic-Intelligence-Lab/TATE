@@ -15,6 +15,7 @@ hand_interp_max_gap: 10      # Maximum gap size (in frames) to fill via linear/S
 # --- Hand Selection Logic ---
 # Options: "auto" (highest confidence score), "left", "right", or "none" (keeps both).
 hand_selection: "none"
+swap_handedness: true       # WiLoR handedness is mirrored for the D405 ego camera stream.
 
 # --- Savitzky-Golay (SG) Filter (Trajectory Smoothing) ---
 smooth_sg_window: 21         # Window size for SG filter (must be odd). Larger = more low-pass filtering.

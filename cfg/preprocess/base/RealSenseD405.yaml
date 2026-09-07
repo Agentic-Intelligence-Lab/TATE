@@ -18,8 +18,8 @@ intrinsics:
   d: [-0.05060414, 0.05627556, 0.00079493, 0.00094071, -0.01816789]
 
 extrinsics:
-  # 4x4 camera-to-world transform used for EEF world coordinates.
-  # Source field: T_cam_in_base. Here base is treated as the world frame.
+  # Legacy/default 4x4 camera-to-world transform. In this dataset convention,
+  # this frame is the right arm base frame.
   c2w:
     - [0.0, 0.70710678, 0.70710678, 0.09618637]
     - [1.0, 0.0, 0.0, 0.0]
@@ -29,6 +29,32 @@ extrinsics:
   pitch_down_deg: 45.0
   optical_projection_base: [1.0, 0.0, 0.0]
   camera_target_base: [0.44653381, 0.0, -0.085]
+
+arm_extrinsics:
+  right:
+    root_body: "right_link11"
+    T_cam_in_right_arm_base:
+      - [0.0, 0.70710678, 0.70710678, 0.09618637]
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, 0.70710678, -0.70710678, 0.26534744]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  # Left arm root frame is the MuJoCo/URDF body left_link1.
+  # The head camera is shared by both arms. The previous c2w is treated as
+  # T_cam_in_right_arm_base, so left uses:
+  # T_cam_in_left_arm_base = T_right_arm_base_in_left_arm_base @ T_cam_in_right_arm_base.
+  left:
+    root_body: "left_link1"
+    T_right_arm_base_in_left_arm_base:
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0, -0.5]
+      - [0.0, 0.0, 1.0, 0.0]
+      - [0.0, 0.0, 0.0, 1.0]
+    T_cam_in_left_arm_base:
+      - [0.0, 0.70710678, 0.70710678, 0.09618637]
+      - [1.0, 0.0, 0.0, -0.5]
+      - [0.0, 0.70710678, -0.70710678, 0.26534744]
+      - [0.0, 0.0, 0.0, 1.0]
 
 extra_transforms:
   T_hand_to_ee:

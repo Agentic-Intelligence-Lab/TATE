@@ -119,6 +119,19 @@ def _arm_display_transforms(data: dict[str, Any]) -> dict[str, np.ndarray]:
     return transforms
 
 
+def _eef_scene_transforms(data: dict[str, Any]) -> dict[str, np.ndarray] | None:
+    raw = data.get("eef_frame_in_scene") or {}
+    if not isinstance(raw, dict) or "right" not in raw or "left" not in raw:
+        return None
+    transforms = {}
+    for side in ("right", "left"):
+        mat = np.asarray(raw[side], dtype=np.float64)
+        if mat.shape != (4, 4):
+            return None
+        transforms[side] = mat
+    return transforms
+
+
 def load_eef_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
 
@@ -130,7 +143,9 @@ def load_eef_json(path: Path) -> dict[str, Any]:
             "right": {"pose": _nan_pose_sequence(n), "valid": np.zeros(n, dtype=bool), "grasp": np.zeros(n, dtype=np.int32)},
             "left": {"pose": _nan_pose_sequence(n), "valid": np.zeros(n, dtype=bool), "grasp": np.zeros(n, dtype=np.int32)},
         }
-        display_tf = _arm_display_transforms(data)
+        scene_tf = _eef_scene_transforms(data)
+        display_tf = scene_tf if scene_tf is not None else _arm_display_transforms(data)
+        display_frame = "scene" if scene_tf is not None else "right_arm_base"
 
         for i, frame in enumerate(frames):
             stamp = frame.get("ts")
@@ -183,7 +198,7 @@ def load_eef_json(path: Path) -> dict[str, Any]:
                 quat[i] = R.from_matrix(pose[i, :3, :3]).as_quat()
         hands[side]["quat_xyzw"] = quat
 
-    return {"time_s": t, "hands": hands, "display_frame": "right_arm_base"}
+    return {"time_s": t, "hands": hands, "display_frame": locals().get("display_frame", "right_arm_base")}
 
 
 def _first_npz_key(data: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray | None:

@@ -172,8 +172,11 @@ class Preprocess:
             "used_fields": [],
             "fallback_fields": ["K", "d", "c2w"],
         }
+        self.arm_root_camera_c2w = {"right": None, "left": None}
         self.arm_camera_c2w = {"right": None, "left": None}
-        self.arm_frame_names = {"right": "right_arm_base", "left": "left_arm_base"}
+        self.arm_eef_frame_in_arm_base = {"right": np.eye(4, dtype=np.float64), "left": np.eye(4, dtype=np.float64)}
+        self.arm_eef_frame_in_scene = {"right": None, "left": None}
+        self.arm_frame_names = {"right": "right_flange_zero", "left": "left_flange_zero"}
         self.has_vrs_input = False
 
     def _camera_params_from_video_defaults(self, w: int, h: int):
@@ -253,6 +256,38 @@ class Preprocess:
             (4, 4),
             "left arm camera extrinsics",
         )
+        right_eef_in_arm = _cfg_matrix(
+            _first_cfg_value(
+                arm_cfg or {},
+                [("right", "T_eef_frame_in_arm_base")],
+            ),
+            (4, 4),
+            "right EEF frame in arm base",
+        )
+        left_eef_in_arm = _cfg_matrix(
+            _first_cfg_value(
+                arm_cfg or {},
+                [("left", "T_eef_frame_in_arm_base")],
+            ),
+            (4, 4),
+            "left EEF frame in arm base",
+        )
+        right_eef_in_scene = _cfg_matrix(
+            _first_cfg_value(
+                arm_cfg or {},
+                [("right", "T_eef_frame_in_scene")],
+            ),
+            (4, 4),
+            "right EEF frame in scene",
+        )
+        left_eef_in_scene = _cfg_matrix(
+            _first_cfg_value(
+                arm_cfg or {},
+                [("left", "T_eef_frame_in_scene")],
+            ),
+            (4, 4),
+            "left EEF frame in scene",
+        )
 
         if right_c2w is None:
             right_c2w = default_c2w
@@ -262,8 +297,28 @@ class Preprocess:
             left_c2w = default_c2w
         else:
             used.append("left")
+        if right_eef_in_arm is None:
+            right_eef_in_arm = np.eye(4, dtype=np.float64)
+        if left_eef_in_arm is None:
+            left_eef_in_arm = np.eye(4, dtype=np.float64)
 
-        self.arm_camera_c2w = {"right": right_c2w, "left": left_c2w}
+        self.arm_root_camera_c2w = {"right": right_c2w, "left": left_c2w}
+        self.arm_eef_frame_in_arm_base = {"right": right_eef_in_arm, "left": left_eef_in_arm}
+        self.arm_eef_frame_in_scene = {"right": right_eef_in_scene, "left": left_eef_in_scene}
+        if right_eef_in_scene is not None and left_eef_in_scene is not None:
+            self.arm_camera_c2w = {
+                "right": np.linalg.inv(right_eef_in_scene) @ default_c2w,
+                "left": np.linalg.inv(left_eef_in_scene) @ default_c2w,
+            }
+        else:
+            self.arm_camera_c2w = {
+                "right": np.linalg.inv(right_eef_in_arm) @ right_c2w,
+                "left": np.linalg.inv(left_eef_in_arm) @ left_c2w,
+            }
+        for side in ("right", "left"):
+            frame_name = _cfg_get(arm_cfg or {}, side, "eef_frame")
+            if frame_name:
+                self.arm_frame_names[side] = str(frame_name)
         self.camera_calibration_meta["arm_extrinsics_used"] = used
 
     def _build_aria_cam_from_video(self, video_path: str) -> AriaCam:
@@ -430,6 +485,14 @@ class Preprocess:
             "k": _safe_list(aria_cam.k),
             "d": _safe_list(aria_cam.d),
             "c2w": _safe_list(aria_cam.cam[0].c2w) if aria_cam.cam else None,
+            "eef_coordinate_convention": {
+                "origin": "flange position at zero joint position",
+                "axes": "right-handed, z-up, +x forward from flange, +y left",
+                "per_side_frames": self.arm_frame_names,
+            },
+            "arm_root_camera_c2w": {side: _safe_list(value) for side, value in self.arm_root_camera_c2w.items()},
+            "eef_frame_in_arm_base": {side: _safe_list(value) for side, value in self.arm_eef_frame_in_arm_base.items()},
+            "eef_frame_in_scene": {side: _safe_list(value) for side, value in self.arm_eef_frame_in_scene.items()},
             "arm_camera_c2w": {side: _safe_list(value) for side, value in self.arm_camera_c2w.items()},
             "camera_calibration": self.camera_calibration_meta,
             "frames": frames,

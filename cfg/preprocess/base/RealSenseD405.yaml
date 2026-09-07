@@ -18,8 +18,8 @@ intrinsics:
   d: [-0.05060414, 0.05627556, 0.00079493, 0.00094071, -0.01816789]
 
 extrinsics:
-  # Legacy/default 4x4 camera-to-world transform. In this dataset convention,
-  # this frame is the right arm base frame.
+  # 4x4 camera-to-world transform. This world frame is the robot base_link:
+  # right-handed, z-up, +x forward, +y left.
   c2w:
     - [0.0, 0.70710678, 0.70710678, 0.09618637]
     - [1.0, 0.0, 0.0, 0.0]
@@ -33,27 +33,49 @@ extrinsics:
 arm_extrinsics:
   right:
     root_body: "right_link11"
+    eef_frame: "right_flange_zero"
+    # True robot EEF/control frame from the ARX docs:
+    # origin is the flange position at zero joint position; axes are right-handed,
+    # z-up, +x forward, +y left. In this model those axes match the arm root axes.
+    T_eef_frame_in_arm_base:
+      - [1.0, 0.0, 0.0, 0.0977]
+      - [0.0, 1.0, 0.0, 0.0]
+      - [0.0, 0.0, 1.0, 0.096]
+      - [0.0, 0.0, 0.0, 1.0]
+    T_eef_frame_in_scene:
+      - [1.0, 0.0, 0.0, 0.08168]
+      - [0.0, 1.0, 0.0, -0.25]
+      - [0.0, 0.0, 1.0, 0.1175]
+      - [0.0, 0.0, 0.0, 1.0]
     T_cam_in_right_arm_base:
-      - [0.0, 0.70710678, 0.70710678, 0.09618637]
-      - [1.0, 0.0, 0.0, 0.0]
-      - [0.0, 0.70710678, -0.70710678, 0.26534744]
+      - [0.0, 0.70710678, 0.70710678, 0.11220637]
+      - [1.0, 0.0, 0.0, 0.25]
+      - [0.0, 0.70710678, -0.70710678, 0.24384744]
       - [0.0, 0.0, 0.0, 1.0]
 
   # Left arm root frame is the MuJoCo/URDF body left_link1.
-  # The head camera is shared by both arms. The previous c2w is treated as
-  # T_cam_in_right_arm_base, so left uses:
-  # T_cam_in_left_arm_base = T_right_arm_base_in_left_arm_base @ T_cam_in_right_arm_base.
   left:
     root_body: "left_link1"
+    eef_frame: "left_flange_zero"
+    T_eef_frame_in_arm_base:
+      - [1.0, 0.0, 0.0, 0.0977]
+      - [0.0, 1.0, 0.0, 0.0]
+      - [0.0, 0.0, 1.0, 0.096]
+      - [0.0, 0.0, 0.0, 1.0]
+    T_eef_frame_in_scene:
+      - [1.0, 0.0, 0.0, 0.08168]
+      - [0.0, 1.0, 0.0, 0.25]
+      - [0.0, 0.0, 1.0, 0.1175]
+      - [0.0, 0.0, 0.0, 1.0]
     T_right_arm_base_in_left_arm_base:
       - [1.0, 0.0, 0.0, 0.0]
       - [0.0, 1.0, 0.0, -0.5]
       - [0.0, 0.0, 1.0, 0.0]
       - [0.0, 0.0, 0.0, 1.0]
     T_cam_in_left_arm_base:
-      - [0.0, 0.70710678, 0.70710678, 0.09618637]
-      - [1.0, 0.0, 0.0, -0.5]
-      - [0.0, 0.70710678, -0.70710678, 0.26534744]
+      - [0.0, 0.70710678, 0.70710678, 0.11220637]
+      - [1.0, 0.0, 0.0, -0.25]
+      - [0.0, 0.70710678, -0.70710678, 0.24384744]
       - [0.0, 0.0, 0.0, 1.0]
 
 extra_transforms:

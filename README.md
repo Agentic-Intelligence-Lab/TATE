@@ -23,6 +23,7 @@ python -m preprocess.Preprocess \
 
 # Notes:
 # `--task` is kept for HumanEgo CLI compatibility and does not affect the current mp4 WiLoR pipeline.
+# EEF JSON uses each arm's zero-position flange frame: z-up, +x forward, +y left.
 ```
 
 ## Retarget
@@ -45,7 +46,7 @@ Use `--viewer` for the interactive mode.
 python real2sim/replay_arx_mujoco.py \
   --mode eef \
   --data outputs/test/preprocess/eef.json \
-  --out outputs/test/replay/eef_replay.mp4 \
+  --out outputs/test/replay/eef_replay.mp4
 
 # replay ik data
 python real2sim/replay_arx_mujoco.py \

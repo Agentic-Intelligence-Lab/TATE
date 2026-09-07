@@ -3,7 +3,7 @@
 
 Modes:
   eef   - replay left/right EEF trajectories as markers; robot stays still.
-  joint - replay right-arm joint qpos from ARX parquet data; robot moves.
+  joint - replay left/right joint qpos from ARX parquet or IK NPZ data.
 
 If --data is omitted, the script only shows/renders the static ARX scene.
 """
@@ -30,6 +30,11 @@ WIDTH = 1280
 HEIGHT = 720
 RIGHT_ARM_JOINTS = tuple(f"right_joint{i}" for i in range(11, 17))
 RIGHT_GRIPPER_JOINTS = ("right_joint17", "right_joint18")
+LEFT_ARM_JOINTS = tuple(f"left_joint{i}" for i in range(1, 7))
+LEFT_GRIPPER_JOINTS = ("left_joint7", "left_joint8")
+ARM_JOINTS_BY_SIDE = {"right": RIGHT_ARM_JOINTS, "left": LEFT_ARM_JOINTS}
+GRIPPER_JOINTS_BY_SIDE = {"right": RIGHT_GRIPPER_JOINTS, "left": LEFT_GRIPPER_JOINTS}
+ARX_LEFT_SLICE = slice(0, 7)
 ARX_RIGHT_SLICE = slice(7, 14)
 SIM_GRIPPER_MAX_M = 0.088
 REAL_GRIPPER_CLOSED = -3.4
@@ -198,40 +203,62 @@ def gripper_scalar_to_qpos(values: np.ndarray) -> np.ndarray:
     return np.column_stack([0.5 * width, 0.5 * width])
 
 
+def _joint_qpos_to_arm(side: str, q: np.ndarray, data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    q = np.asarray(q, dtype=np.float64)
+    if q.ndim != 2 or q.shape[1] < len(ARM_JOINTS_BY_SIDE[side]):
+        raise RuntimeError(f"{side} qpos must be Nx6 or wider, got {q.shape}")
+
+    n = len(q)
+    arm = {
+        "arm_qpos": q[:, : len(ARM_JOINTS_BY_SIDE[side])],
+        "gripper_qpos": np.full((n, 2), 0.044, dtype=np.float64),
+    }
+    if q.shape[1] >= len(ARM_JOINTS_BY_SIDE[side]) + 2:
+        arm["gripper_qpos"] = q[:, len(ARM_JOINTS_BY_SIDE[side]) : len(ARM_JOINTS_BY_SIDE[side]) + 2]
+    elif q.shape[1] >= len(ARM_JOINTS_BY_SIDE[side]) + 1:
+        arm["gripper_qpos"] = gripper_scalar_to_qpos(q[:, len(ARM_JOINTS_BY_SIDE[side])])
+    elif f"{side}_gripper_width_m" in data:
+        arm["gripper_qpos"] = gripper_scalar_to_qpos(data[f"{side}_gripper_width_m"])
+    elif f"{side}_grasp" in data:
+        grasp = np.asarray(data[f"{side}_grasp"], dtype=np.int32).reshape(-1)
+        width = np.where(grasp > 0, 0.0, SIM_GRIPPER_MAX_M)
+        arm["gripper_qpos"] = np.column_stack([0.5 * width, 0.5 * width])
+    return arm
+
+
 def load_joint_npz(path: Path) -> dict[str, np.ndarray]:
     raw = np.load(path, allow_pickle=False)
     data = {k: raw[k] for k in raw.files}
-    q = _first_npz_key(data, ("right_joint_qpos", "right_arm_qpos", "joint_qpos"))
-    if q is None:
+    right_q = _first_npz_key(data, ("right_joint_qpos", "right_arm_qpos", "joint_qpos"))
+    if right_q is None:
         raise RuntimeError(f"Joint replay requires right-arm qpos data in {path}")
-    q = np.asarray(q, dtype=np.float64)
-    if q.ndim != 2 or q.shape[1] < len(RIGHT_ARM_JOINTS):
-        raise RuntimeError(f"Right-arm qpos must be Nx6 or wider, got {q.shape}")
+    right_q = np.asarray(right_q, dtype=np.float64)
+    left_q = _first_npz_key(data, ("left_joint_qpos", "left_arm_qpos"))
 
-    n = len(q)
+    n = len(right_q)
     out = {
         "time_s": np.asarray(data.get("time_s", np.arange(n, dtype=np.float64) / FPS), dtype=np.float64),
-        "arm_qpos": q[:, : len(RIGHT_ARM_JOINTS)],
-        "gripper_qpos": np.full((n, 2), 0.044, dtype=np.float64),
+        "arms": {"right": _joint_qpos_to_arm("right", right_q, data)},
         "target_pos": _first_npz_key(data, ("right_target_pos_m", "target_pos_m")),
         "target_quat_xyzw": _first_npz_key(data, ("right_target_quat_xyzw", "target_quat_xyzw")),
-        "pos_err_m": np.asarray(data.get("pos_err_m", np.full(n, np.nan)), dtype=np.float64),
-        "ang_err_deg": np.asarray(data.get("ang_err_deg", np.full(n, np.nan)), dtype=np.float64),
+        "pos_err_m": np.asarray(data.get("right_pos_err_m", data.get("pos_err_m", np.full(n, np.nan))), dtype=np.float64),
+        "ang_err_deg": np.asarray(data.get("right_ang_err_deg", data.get("ang_err_deg", np.full(n, np.nan))), dtype=np.float64),
     }
-
-    if q.shape[1] >= len(RIGHT_ARM_JOINTS) + 2:
-        out["gripper_qpos"] = q[:, len(RIGHT_ARM_JOINTS) : len(RIGHT_ARM_JOINTS) + 2]
-    elif q.shape[1] >= len(RIGHT_ARM_JOINTS) + 1:
-        out["gripper_qpos"] = gripper_scalar_to_qpos(q[:, len(RIGHT_ARM_JOINTS)])
-    elif "gripper_width_m" in data:
-        out["gripper_qpos"] = gripper_scalar_to_qpos(data["gripper_width_m"])
-    elif "grasp" in data:
-        grasp = np.asarray(data["grasp"], dtype=np.int32).reshape(-1)
-        width = np.where(grasp > 0, 0.0, SIM_GRIPPER_MAX_M)
-        out["gripper_qpos"] = np.column_stack([0.5 * width, 0.5 * width])
+    if left_q is not None:
+        left_q = np.asarray(left_q, dtype=np.float64)
+        if len(left_q) != n:
+            raise RuntimeError(f"left qpos length {len(left_q)} does not match right qpos length {n}")
+        out["arms"]["left"] = _joint_qpos_to_arm("left", left_q, data)
+    out["arms"]["right"]["target_pos"] = out["target_pos"]
+    out["arms"]["right"]["target_quat_xyzw"] = out["target_quat_xyzw"]
+    if "left" in out["arms"]:
+        out["arms"]["left"]["target_pos"] = _first_npz_key(data, ("left_target_pos_m",))
+        out["arms"]["left"]["target_quat_xyzw"] = _first_npz_key(data, ("left_target_quat_xyzw",))
 
     if len(out["time_s"]) != n:
         raise RuntimeError(f"time_s length {len(out['time_s'])} does not match qpos length {n}")
+    out["arm_qpos"] = out["arms"]["right"]["arm_qpos"]
+    out["gripper_qpos"] = out["arms"]["right"]["gripper_qpos"]
     return out
 
 
@@ -247,6 +274,7 @@ def load_joint_parquet(path: Path) -> dict[str, np.ndarray]:
     if state.ndim != 2 or state.shape[1] < ARX_RIGHT_SLICE.stop:
         raise RuntimeError(f"{source_col} must contain at least 14 values with right-arm data, got {state.shape}")
 
+    left = state[:, ARX_LEFT_SLICE]
     right = state[:, ARX_RIGHT_SLICE]
     n = len(right)
     if "timestamp" in df.columns:
@@ -257,6 +285,16 @@ def load_joint_parquet(path: Path) -> dict[str, np.ndarray]:
 
     return {
         "time_s": t,
+        "arms": {
+            "right": {
+                "arm_qpos": right[:, : len(RIGHT_ARM_JOINTS)],
+                "gripper_qpos": gripper_scalar_to_qpos(right[:, len(RIGHT_ARM_JOINTS)]),
+            },
+            "left": {
+                "arm_qpos": left[:, : len(LEFT_ARM_JOINTS)],
+                "gripper_qpos": gripper_scalar_to_qpos(left[:, len(LEFT_ARM_JOINTS)]),
+            },
+        },
         "arm_qpos": right[:, : len(RIGHT_ARM_JOINTS)],
         "gripper_qpos": gripper_scalar_to_qpos(right[:, len(RIGHT_ARM_JOINTS)]),
         "target_pos": None,
@@ -341,18 +379,19 @@ def hide_marker(data, marker_mid: int | None) -> None:
     data.mocap_quat[marker_mid] = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
 
-def apply_joint_frame(data, arm_addrs, gripper_addrs, acts, frame: dict[str, Any]) -> None:
-    data.time = float(frame["time_s"])
-    arm_qpos = np.asarray(frame["arm_qpos"], dtype=np.float64)
-    gripper_qpos = np.asarray(frame["gripper_qpos"], dtype=np.float64)
-    data.qpos[arm_addrs] = arm_qpos
-    data.qpos[gripper_addrs] = gripper_qpos
-    for name, value in zip(RIGHT_ARM_JOINTS, arm_qpos):
-        if name in acts:
-            data.ctrl[acts[name]] = float(value)
-    for name, value in zip(RIGHT_GRIPPER_JOINTS, gripper_qpos):
-        if name in acts:
-            data.ctrl[acts[name]] = float(value)
+def apply_joint_frame(data, replay: dict[str, Any], i: int, arm_addrs, gripper_addrs, acts) -> None:
+    data.time = float(replay["time_s"][i])
+    for side, arm in replay.get("arms", {}).items():
+        arm_qpos = np.asarray(arm["arm_qpos"][i], dtype=np.float64)
+        gripper_qpos = np.asarray(arm["gripper_qpos"][i], dtype=np.float64)
+        data.qpos[arm_addrs[side]] = arm_qpos
+        data.qpos[gripper_addrs[side]] = gripper_qpos
+        for name, value in zip(ARM_JOINTS_BY_SIDE[side], arm_qpos):
+            if name in acts:
+                data.ctrl[acts[name]] = float(value)
+        for name, value in zip(GRIPPER_JOINTS_BY_SIDE[side], gripper_qpos):
+            if name in acts:
+                data.ctrl[acts[name]] = float(value)
 
 
 def _add_capsule(scn, mj, p0, p1, rgba, radius: float) -> None:
@@ -437,6 +476,16 @@ def draw_eef_replay(scn, replay: dict[str, Any], i: int) -> None:
             draw_eef_marker(scn, hand["pose"][i], style["sphere_rgba"])
 
 
+def draw_joint_targets(scn, replay: dict[str, Any], i: int) -> None:
+    for side, arm in replay.get("arms", {}).items():
+        target_pos = arm.get("target_pos")
+        if target_pos is None:
+            continue
+        pos = np.asarray(target_pos[i], dtype=np.float64)
+        if pos.shape == (3,) and np.isfinite(pos).all():
+            _add_sphere(scn, require_runtime()[1], pos, EEF_STYLES[side]["sphere_rgba"], 0.014)
+
+
 def eef_info(replay: dict[str, Any], i: int) -> str:
     chunks = []
     for side in ("right", "left"):
@@ -447,6 +496,18 @@ def eef_info(replay: dict[str, Any], i: int) -> str:
         else:
             chunks.append(f"{side[0].upper()} n/a")
     return f"cyan=right magenta=left frame={replay.get('display_frame', 'scene')}  " + "  ".join(chunks)
+
+
+def joint_info(replay: dict[str, Any], i: int) -> str:
+    chunks = []
+    for side in ("right", "left"):
+        arm = replay.get("arms", {}).get(side)
+        if arm is None:
+            chunks.append(f"{side[0].upper()} n/a")
+            continue
+        q = arm["arm_qpos"][i]
+        chunks.append(f"{side[0].upper()} q0={q[0]:+.2f} q1={q[1]:+.2f} q2={q[2]:+.2f}")
+    return "joint arms: " + "  ".join(chunks)
 
 
 def draw_hud(frame_rgb: np.ndarray, mode: str, i: int, n: int, info: str) -> np.ndarray:
@@ -488,9 +549,10 @@ def launch_viewer(args, replay: dict[str, np.ndarray] | None) -> None:
 
         arm_addrs = gripper_addrs = acts = None
         if args.mode == "joint":
-            arm_addrs = qpos_addrs(model, RIGHT_ARM_JOINTS)
-            gripper_addrs = qpos_addrs(model, RIGHT_GRIPPER_JOINTS)
-            acts = actuator_ids(model, RIGHT_ARM_JOINTS + RIGHT_GRIPPER_JOINTS)
+            arm_addrs = {side: qpos_addrs(model, joints) for side, joints in ARM_JOINTS_BY_SIDE.items()}
+            gripper_addrs = {side: qpos_addrs(model, joints) for side, joints in GRIPPER_JOINTS_BY_SIDE.items()}
+            all_joints = LEFT_ARM_JOINTS + LEFT_GRIPPER_JOINTS + RIGHT_ARM_JOINTS + RIGHT_GRIPPER_JOINTS
+            acts = actuator_ids(model, all_joints)
 
         i = 0
         while viewer.is_running():
@@ -501,12 +563,15 @@ def launch_viewer(args, replay: dict[str, np.ndarray] | None) -> None:
                     viewer.user_scn.ngeom = 0
                     draw_eef_replay(viewer.user_scn, replay, i)
                 else:
-                    frame = {k: v[i] for k, v in replay.items() if isinstance(v, np.ndarray) and len(v) == len(replay["time_s"])}
-                    apply_joint_frame(data, arm_addrs, gripper_addrs, acts, frame)
-                    if replay["target_pos"] is not None and replay["target_quat_xyzw"] is not None:
+                    apply_joint_frame(data, replay, i, arm_addrs, gripper_addrs, acts)
+                    viewer.user_scn.ngeom = 0
+                    draw_joint_targets(viewer.user_scn, replay, i)
+                    if any(arm.get("target_pos") is not None for arm in replay.get("arms", {}).values()):
+                        hide_marker(data, marker_mid)
+                    elif replay["target_pos"] is not None and replay["target_quat_xyzw"] is not None:
                         set_marker(data, marker_mid, replay["target_pos"][i], replay["target_quat_xyzw"][i])
                 mj.mj_forward(model, data)
-            detail = eef_info(replay, i) if args.mode == "eef" else "right arm data"
+            detail = eef_info(replay, i) if args.mode == "eef" else joint_info(replay, i)
             viewer.set_texts((None, None, f"ARX {args.mode} replay\n{i + 1}/{len(replay['time_s'])}", detail))
             viewer.sync()
             i = 0 if i == len(replay["time_s"]) - 1 else i + 1
@@ -527,9 +592,10 @@ def render_mp4(args, replay: dict[str, np.ndarray] | None) -> None:
 
     arm_addrs = gripper_addrs = acts = None
     if replay is not None and args.mode == "joint":
-        arm_addrs = qpos_addrs(model, RIGHT_ARM_JOINTS)
-        gripper_addrs = qpos_addrs(model, RIGHT_GRIPPER_JOINTS)
-        acts = actuator_ids(model, RIGHT_ARM_JOINTS + RIGHT_GRIPPER_JOINTS)
+        arm_addrs = {side: qpos_addrs(model, joints) for side, joints in ARM_JOINTS_BY_SIDE.items()}
+        gripper_addrs = {side: qpos_addrs(model, joints) for side, joints in GRIPPER_JOINTS_BY_SIDE.items()}
+        all_joints = LEFT_ARM_JOINTS + LEFT_GRIPPER_JOINTS + RIGHT_ARM_JOINTS + RIGHT_GRIPPER_JOINTS
+        acts = actuator_ids(model, all_joints)
 
     try:
         n = len(replay["time_s"]) if replay is not None else int(FPS * 2)
@@ -541,15 +607,18 @@ def render_mp4(args, replay: dict[str, np.ndarray] | None) -> None:
                 hide_marker(data, marker_mid)
                 info = eef_info(replay, i)
             else:
-                frame = {k: v[i] for k, v in replay.items() if isinstance(v, np.ndarray) and len(v) == len(replay["time_s"])}
-                apply_joint_frame(data, arm_addrs, gripper_addrs, acts, frame)
-                if replay["target_pos"] is not None and replay["target_quat_xyzw"] is not None:
+                apply_joint_frame(data, replay, i, arm_addrs, gripper_addrs, acts)
+                if any(arm.get("target_pos") is not None for arm in replay.get("arms", {}).values()):
+                    hide_marker(data, marker_mid)
+                elif replay["target_pos"] is not None and replay["target_quat_xyzw"] is not None:
                     set_marker(data, marker_mid, replay["target_pos"][i], replay["target_quat_xyzw"][i])
-                info = f"right arm qpos: {replay['arm_qpos'][i]}"
+                info = joint_info(replay, i)
             mj.mj_forward(model, data)
             renderer.update_scene(data, camera=camera)
             if replay is not None and args.mode == "eef" and hasattr(renderer, "scene"):
                 draw_eef_replay(renderer.scene, replay, i)
+            if replay is not None and args.mode == "joint" and hasattr(renderer, "scene"):
+                draw_joint_targets(renderer.scene, replay, i)
             writer.write(draw_hud(renderer.render(), args.mode, i, n, info))
     finally:
         writer.release()

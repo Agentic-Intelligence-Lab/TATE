@@ -1,0 +1,23 @@
+{
+  "device": "Intel RealSense D405",
+  "serial": "409122273248",
+  "role": "head",
+  "resolution": "1280x720",
+  "fps": 30,
+  "format": "bgr8",
+  "source": "Read from the ARX-connected device via pyrealsense2.",
+  "width": 1280,
+  "height": 720,
+  "fx": 657.06060791,
+  "fy": 656.76757812,
+  "ppx": 643.96606445,
+  "ppy": 353.84866333,
+  "distortion_model": "inverse_brown_conrady",
+  "coeffs": [
+    -0.04893810302019119,
+    0.05839170143008232,
+    0.001140566891990602,
+    0.0009892762172967196,
+    -0.020692436024546623
+  ]
+}

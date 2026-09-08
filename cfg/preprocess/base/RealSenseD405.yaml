@@ -1,25 +1,26 @@
 # RealSense D405 camera calibration.
-# Fill these values for the exact device and video resolution used by --video_path.
+# ARX head camera, calibrated at 1280x720. Recalibrate after moving the camera.
 
 camera_model: "RealSense D405"
 
 resolution:
-  width: 640
-  height: 480
+  width: 1280
+  height: 720
 
 intrinsics:
   # 3x3 camera intrinsic matrix, e.g. [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
   K:
-    - [393.030548, 0.0, 312.918335]
-    - [0.0, 392.679291, 240.937149]
+    - [657.06060791, 0.0, 643.96606445]
+    - [0.0, 656.76757812, 353.84866333]
     - [0.0, 0.0, 1.0]
   # Distortion coefficients accepted by OpenCV projectPoints, e.g. [k1, k2, p1, p2, k3]
   distortion_model: "inverse_brown_conrady"
-  d: [-0.05060414, 0.05627556, 0.00079493, 0.00094071, -0.01816789]
+  d: [-0.04893810302019119, 0.05839170143008232, 0.001140566891990602, 0.0009892762172967196, -0.020692436024546623]
 
 extrinsics:
-  # 4x4 camera-to-world transform. This world frame is the robot base_link:
-  # right-handed, z-up, +x forward, +y left.
+  # Legacy nominal camera-to-scene transform. Arm-specific processing prefers
+  # the measured T_cam_in_*_arm_base values below. An arm-specific PnP result
+  # cannot define this shared scene frame, so calibration does not overwrite it.
   c2w:
     - [0.0, 0.70710678, 0.70710678, 0.09618637]
     - [1.0, 0.0, 0.0, 0.0]
@@ -48,10 +49,17 @@ arm_extrinsics:
       - [0.0, 0.0, 1.0, 0.1175]
       - [0.0, 0.0, 0.0, 1.0]
     T_cam_in_right_arm_base:
-      - [0.0, 0.70710678, 0.70710678, 0.11220637]
-      - [1.0, 0.0, 0.0, 0.25]
-      - [0.0, 0.70710678, -0.70710678, 0.24384744]
+      - [-0.007884598803096941, -0.8493136278117043, 0.5278297023804517, -0.0007267315718541108]
+      - [-0.9997766884437033, -0.0036540040481118628, -0.02081397364654093, 0.24572015602439864]
+      - [0.01960628333613276, -0.5278759417398546, -0.8490951559077491, 0.43863528033454025]
       - [0.0, 0.0, 0.0, 1.0]
+    calibration:
+      result_json: "camera_extrinsics_arx_right.json"
+      result_sha256: "db0a46ca5ca0b68d74b6afaa2e2f8fa060a5147f86120c40ab4fe3dd965d5ac1"
+      tag_corners_base_source: "examples/calib/tag_corners_base_arx_right.json"
+      tag_family: "36h11"
+      tags_used: [1, 2]
+      reprojection_rmse_px: 0.4055555890704318
 
   # Left arm root frame is the MuJoCo/URDF body left_link1.
   left:
@@ -73,10 +81,17 @@ arm_extrinsics:
       - [0.0, 0.0, 1.0, 0.0]
       - [0.0, 0.0, 0.0, 1.0]
     T_cam_in_left_arm_base:
-      - [0.0, 0.70710678, 0.70710678, 0.11220637]
-      - [1.0, 0.0, 0.0, -0.25]
-      - [0.0, 0.70710678, -0.70710678, 0.24384744]
+      - [0.012304577167053726, -0.8480269747430157, 0.5298101994950163, -0.004327767812315462]
+      - [-0.99854992502052, -0.03819179096477238, -0.0379398780232282, -0.23521905413719013]
+      - [0.05240844037227538, -0.5285751008240097, -0.8472672058840903, 0.4445098393115619]
       - [0.0, 0.0, 0.0, 1.0]
+    calibration:
+      result_json: "camera_extrinsics_arx_left.json"
+      result_sha256: "e4b7e6f09dd1591d0520c2fcd30eb06439f98aaaa51dacf1d31b032ca27e2ab7"
+      tag_corners_base_source: "examples/calib/tag_corners_base_arx_left.json"
+      tag_family: "36h11"
+      tags_used: [1, 2]
+      reprojection_rmse_px: 0.30809731076586006
 
 extra_transforms:
   T_hand_to_ee:
@@ -90,4 +105,4 @@ extra_transforms:
     - [1.0, 0.0, 0.0, 0.0]
     - [0.0, 0.0, 0.0, 1.0]
 
-notes: "Primary ARX AC one HumanEgo cell using the built-in HEAD camera."
+notes: "ARX AC one HumanEgo cell, built-in HEAD D405; left/right arm-base extrinsics calibrated separately."

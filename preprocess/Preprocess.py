@@ -289,6 +289,10 @@ class Preprocess:
             "left EEF frame in scene",
         )
 
+        # Remember which per-arm camera poses were actually configured before
+        # applying fallbacks.  A measured T_cam_in_*_arm_base must take
+        # precedence over the legacy global camera-to-scene pose.
+        has_measured_c2w = {"right": right_c2w is not None, "left": left_c2w is not None}
         if right_c2w is None:
             right_c2w = default_c2w
         else:
@@ -305,16 +309,15 @@ class Preprocess:
         self.arm_root_camera_c2w = {"right": right_c2w, "left": left_c2w}
         self.arm_eef_frame_in_arm_base = {"right": right_eef_in_arm, "left": left_eef_in_arm}
         self.arm_eef_frame_in_scene = {"right": right_eef_in_scene, "left": left_eef_in_scene}
-        if right_eef_in_scene is not None and left_eef_in_scene is not None:
-            self.arm_camera_c2w = {
-                "right": np.linalg.inv(right_eef_in_scene) @ default_c2w,
-                "left": np.linalg.inv(left_eef_in_scene) @ default_c2w,
-            }
-        else:
-            self.arm_camera_c2w = {
-                "right": np.linalg.inv(right_eef_in_arm) @ right_c2w,
-                "left": np.linalg.inv(left_eef_in_arm) @ left_c2w,
-            }
+        self.arm_camera_c2w = {}
+        for side, arm_base_c2w, eef_in_arm, eef_in_scene in (
+            ("right", right_c2w, right_eef_in_arm, right_eef_in_scene),
+            ("left", left_c2w, left_eef_in_arm, left_eef_in_scene),
+        ):
+            if has_measured_c2w[side] or eef_in_scene is None:
+                self.arm_camera_c2w[side] = np.linalg.inv(eef_in_arm) @ arm_base_c2w
+            else:
+                self.arm_camera_c2w[side] = np.linalg.inv(eef_in_scene) @ default_c2w
         for side in ("right", "left"):
             frame_name = _cfg_get(arm_cfg or {}, side, "eef_frame")
             if frame_name:

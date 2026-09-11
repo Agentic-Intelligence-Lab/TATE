@@ -28,7 +28,7 @@ from training.arx_joint_config import (
 from training.arx_joint_policy import ACTION_DIM
 
 
-DEFAULT_PI05_WEIGHT_PATH = "/mnt/data/szeluresearch/models/pi05_base"
+DEFAULT_PI05_WEIGHT_PATH = "/mnt/workspace/sunxiaoquan/models/pi05_base"
 
 
 def _patch_pytorch_action_loss_dim(loss_action_dim: int) -> None:

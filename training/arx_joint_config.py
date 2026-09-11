@@ -77,9 +77,15 @@ class ArxJointDataConfig(openpi_config.DataConfigFactory):
     """LeRobot DataConfig for three-camera ARX joint training."""
 
     default_prompt: str | None = DEFAULT_TASK_PROMPT
+    mask_wrist_images: bool | None = None
 
     @override
     def create(self, assets_dirs: Path, model_config: _model.BaseModelConfig) -> openpi_config.DataConfig:
+        mask_wrist_images = (
+            self.mask_wrist_images
+            if self.mask_wrist_images is not None
+            else self.repo_id.endswith("_ego")
+        )
         repack_transform = transforms.Group(
             inputs=[
                 transforms.RepackTransform(
@@ -97,7 +103,12 @@ class ArxJointDataConfig(openpi_config.DataConfigFactory):
             ]
         )
         data_transforms = transforms.Group(
-            inputs=[arx_joint_policy.ArxJointInputs(model_type=model_config.model_type)],
+            inputs=[
+                arx_joint_policy.ArxJointInputs(
+                    model_type=model_config.model_type,
+                    mask_wrist_images=mask_wrist_images,
+                )
+            ],
             outputs=[arx_joint_policy.ArxJointOutputs()],
         )
         model_transforms = openpi_config.ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -131,6 +142,7 @@ def build_config(
     wandb_enabled: bool = False,
     overwrite: bool = False,
     resume: bool = False,
+    mask_wrist_images: bool | None = None,
 ) -> openpi_config.TrainConfig:
     if model == "pi0":
         model_config = pi0_config.Pi0Config(
@@ -162,6 +174,7 @@ def build_config(
         data=ArxJointDataConfig(
             repo_id=repo_id,
             base_config=openpi_config.DataConfig(prompt_from_task=True),
+            mask_wrist_images=mask_wrist_images,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(checkpoint),
         pytorch_weight_path=pytorch_weight_path,

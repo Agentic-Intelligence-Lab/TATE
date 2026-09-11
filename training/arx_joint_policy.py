@@ -56,6 +56,7 @@ class ArxJointInputs(transforms.DataTransformFn):
     """Map ARX LeRobot samples to OpenPI's three-camera observation format."""
 
     model_type: _model.ModelType
+    mask_wrist_images: bool = False
 
     def __call__(self, data: dict) -> dict:
         images = data["images"]
@@ -77,8 +78,8 @@ class ArxJointInputs(transforms.DataTransformFn):
             }
             image_mask = {
                 "base_0_rgb": np.True_,
-                "base_1_rgb": np.True_,
-                "wrist_0_rgb": np.True_,
+                "base_1_rgb": np.False_ if self.mask_wrist_images else np.True_,
+                "wrist_0_rgb": np.False_ if self.mask_wrist_images else np.True_,
             }
         else:
             image = {
@@ -88,8 +89,8 @@ class ArxJointInputs(transforms.DataTransformFn):
             }
             image_mask = {
                 "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
-                "right_wrist_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.False_ if self.mask_wrist_images else np.True_,
+                "right_wrist_0_rgb": np.False_ if self.mask_wrist_images else np.True_,
             }
 
         inputs = {

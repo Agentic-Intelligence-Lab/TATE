@@ -46,7 +46,23 @@ thirdparty/openpi/.venv/bin/python training/compute_arx_norm_stats.py \
   --repo-id local/arx_stack_cube_cotrain
 ```
 
-## 3. Check the loader
+## 3. Move to HPC
+
+Copy these paths:
+
+```text
+training/
+thirdparty/openpi/                 # same revision: 15a9616a00943ada6c20a0f158e3adb39df2ccac
+outputs/lerobot/local/arx_stack_cube_ego/
+outputs/openpi_assets/arx_joint/local/arx_stack_cube_ego/
+```
+
+The OpenPI `.venv` does not need to be copied. Recreate it on HPC with
+`uv sync --frozen`, then apply the PyTorch transformers patch described in the
+OpenPI README. Raw `DATA/` and preprocessing outputs are not needed for
+training.
+
+## 4. Check the loader
 
 ```bash
 thirdparty/openpi/.venv/bin/python training/check_arx_joint_dataloader.py \
@@ -55,11 +71,7 @@ thirdparty/openpi/.venv/bin/python training/check_arx_joint_dataloader.py \
   --skip-norm-stats
 ```
 
-For co-training, replace the repo id and dataset root with
-`local/arx_stack_cube_cotrain` and
-`outputs/lerobot/local/arx_stack_cube_cotrain`.
-
-## 4. Compute normalization
+## 5. Compute normalization
 
 ```bash
 thirdparty/openpi/.venv/bin/python training/compute_arx_norm_stats.py \
@@ -67,7 +79,7 @@ thirdparty/openpi/.venv/bin/python training/compute_arx_norm_stats.py \
   --repo-id local/arx_stack_cube_ego
 ```
 
-## 5. Train Pi0.5
+## 6. Train Pi0.5
 
 ```bash
 cd thirdparty/openpi
@@ -76,16 +88,22 @@ uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --repo-id local/arx_stack_cube_ego \
   --dataset-root ../../outputs/lerobot/local/arx_stack_cube_ego \
   --model pi05 \
-  --pytorch-weight-path /mnt/data/szeluresearch/models/pi05_base \
+  --pytorch-weight-path /mnt/workspace/sunxiaoquan/models/pi05_base \
   --batch-size 8
 ```
 
 The raw ARX state/action layout is 14D:
 `left_joint_1..6,left_gripper,right_joint_1..6,right_gripper`.
 The OpenPI model keeps its 32D action head; only the first 14 dimensions are
-supervised. Checkpoints and assets are written below `outputs`.
+supervised. For `local/arx_stack_cube_ego`, the head camera is enabled and both
+wrist-camera masks are set to `False`; `local/arx_stack_cube_arx` and
+`local/arx_stack_cube_cotrain` use all three cameras. Checkpoints and assets are
+written below `outputs`.
 
-## 6. Evaluate
+For co-training, replace both `local/arx_stack_cube_ego` paths above with
+`local/arx_stack_cube_cotrain`.
+
+## 7. Evaluate
 
 ```bash
 thirdparty/openpi/.venv/bin/python training/evaluate_arx_joint_pytorch.py \

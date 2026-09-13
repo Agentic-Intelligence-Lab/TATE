@@ -1,0 +1,32 @@
+task: stack_cube
+active_sides: [right]
+
+activity:
+  left:
+    expected_events: null
+    require_expected_events: false
+  right:
+    # Episodes start closed; transitions are open -> pickup close -> place open.
+    expected_events: [open, close, open]
+    require_expected_events: true
+    allow_ambiguous_events: false
+
+alignment:
+  method: position_dtw
+  sample_count: 200
+  sample_rate_hz: null
+  max_invalid_gap_s: 0.25
+  # LifEgo uses unconstrained position DTW.
+  dtw_window_ratio: null
+  segment:
+    # LifEgo metrics use only the task trajectory bounded by gripper events.
+    start_event: first
+    end_event: last
+
+correction:
+  # Fit trajectory endpoints plus open, pickup-close, and place-open.
+  anchors: [start, 0, 1, 2, end]
+
+pairing:
+  policy: all_pairs
+  fixed_pairs: []

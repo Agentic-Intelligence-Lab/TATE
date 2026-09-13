@@ -868,29 +868,36 @@ class AriaHandsOps:
         ang_vels = []
         for h_group in aria_hands.hands:
             for hand in [h_group.hand_r, h_group.hand_l]:
-                if hand and hand.wrist_pose is not None:
-                    lin_vels.append(np.linalg.norm(hand.wrist_lin_vel_opt_world))
-                    ang_vels.append(np.linalg.norm(hand.wrist_ang_vel_opt_world))
+                if hand and hand.midpoint_pose_opt_world is not None:
+                    lin_vels.append(np.linalg.norm(hand.midpoint_lin_vel_opt_world))
+                    ang_vels.append(np.linalg.norm(hand.midpoint_ang_vel_opt_world))
 
         max_lin_v = max(lin_vels) if lin_vels else 0.0
         avg_lin_v = np.mean(lin_vels) if lin_vels else 0.0
         max_ang_v = max(ang_vels) if ang_vels else 0.0
         avg_ang_v = np.mean(ang_vels) if ang_vels else 0.0
 
-        def count_grasps(hand_side: str) -> int:
-            """Count grasp onset events (0→1 transitions) for one hand side."""
-            states = [getattr(h, hand_side).grasp_state if getattr(h, hand_side) else 0 for h in aria_hands.hands]
-            return sum(1 for i in range(1, len(states)) if states[i] == 1 and states[i-1] == 0)
+        def count_gripper_events(hand_side: str) -> int:
+            """Count all 0↔1 changes after the first valid gripper state."""
+            states = [
+                getattr(frame, hand_side).grasp_state
+                for frame in aria_hands.hands
+                if getattr(frame, hand_side) is not None
+            ]
+            return sum(
+                1 for previous, current in zip(states, states[1:])
+                if current != previous
+            )
 
-        r_grasps = count_grasps('hand_r')
-        l_grasps = count_grasps('hand_l')
+        r_gripper_events = count_gripper_events('hand_r')
+        l_gripper_events = count_gripper_events('hand_l')
 
         print("\n" + "╔" + "═" * 60 + "╗")
         print(f"║{'ARIA HAND INTERACTION & KINEMATICS REPORT':^60}║")
         print("╠" + "═" * 60 + "╣")
         print(f"║  - Total Frames       : {total_frames:<38} ║")
         print(f"║  - Hand Presence (R/L): {f'{r_frames} / {l_frames}':<38} ║")
-        print(f"║  - Grasp Events (R/L) : {f'{r_grasps} / {l_grasps}':<38} ║")
+        print(f"║  - Gripper Events (R/L) : {f'{r_gripper_events} / {l_gripper_events}':<32} ║")
         print(f"║ {'':<58} ║")
         print(f"║ [SMOOTHED KINEMATICS - OPTIMIZED] {'':<25} ║")
         print(f"║  - Peak Linear Speed  : {max_lin_v:>8.3f} m/s {'':<28} ║")
@@ -1599,4 +1606,3 @@ class AriaHandsOps:
                     # Render only the simplified parallel-jaw view (wrist + thumb + index)
                     img = AriaHandsOps._draw_opt_wrist_thumb_index_only(img, hand, k, d, c2w)
         return img
-        

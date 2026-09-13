@@ -147,6 +147,31 @@ def update_yaml_from_result(
         intrinsics_end,
     )
 
+    # Keep an existing exact-resolution preprocessing profile in sync with the
+    # newly imported calibration. Other resolution profiles remain untouched.
+    intrinsics_i = _find_key(lines, "intrinsics", 0)
+    intrinsics_end = _mapping_end(lines, intrinsics_i, 0)
+    profile_key = json.dumps(f"{int(intrinsics['width'])}x{int(intrinsics['height'])}")
+    try:
+        profile_i = _find_key(lines, profile_key, 4, intrinsics_i + 1, intrinsics_end)
+    except ValueError:
+        profile_i = None
+    if profile_i is not None:
+        profile_end = _mapping_end(lines, profile_i, 4)
+        _replace_sequence_block(lines, "K", 6, K, profile_i + 1, profile_end)
+        intrinsics_i = _find_key(lines, "intrinsics", 0)
+        intrinsics_end = _mapping_end(lines, intrinsics_i, 0)
+        profile_i = _find_key(lines, profile_key, 4, intrinsics_i + 1, intrinsics_end)
+        profile_end = _mapping_end(lines, profile_i, 4)
+        _replace_scalar(
+            lines,
+            "d",
+            6,
+            [float(value) for value in intrinsics["dist_coeffs"]],
+            profile_i + 1,
+            profile_end,
+        )
+
     arms_i = _find_key(lines, "arm_extrinsics", 0)
     arms_end = _mapping_end(lines, arms_i, 0)
     arm_i = _find_key(lines, arm, 2, arms_i + 1, arms_end)

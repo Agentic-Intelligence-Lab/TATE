@@ -33,6 +33,7 @@ Technical Specifics:
 import numpy as np
 from typing import Optional, List, Tuple, Any
 from scipy.signal import savgol_filter
+from scipy.spatial.transform import Rotation as R
 
 from preprocess.AriaHandsTypes import MidpointFrameBuilder, AriaHandData, AriaHands
 
@@ -215,12 +216,27 @@ class AriaHandsOptimizer:
                 index_base_opt = self.smoother.optimize_positions(index_base_raw, valid_mask)
                 
                 mid_pos_opt = 0.5 * (thumb_pos_opt + index_pos_opt)
+                mid_pos_limited = self._limit_position_steps(
+                    mid_pos_opt,
+                    float(getattr(self.cfg, "opt_v_limit", 0.0)),
+                    self.dt,
+                )
+                # Apply one common translation correction so hand geometry is
+                # preserved while the exported midpoint obeys the EEF limit.
+                translation_correction = mid_pos_limited - mid_pos_opt
+                wrist_pos_opt += translation_correction
+                thumb_pos_opt += translation_correction
+                index_pos_opt += translation_correction
+                thumb_base_opt += translation_correction
+                index_base_opt += translation_correction
+                mid_pos_opt = mid_pos_limited
 
                 # --- Step 2: Orientation Smoothing (EMA + Basis Re-ortho) ---
                 # Wrist and Midpoint EMA Caches
                 wrist_x_ema, wrist_y_ema = None, None
                 mid_x_ema, mid_y_ema = None, None
-                mid_prev_R = None 
+                wrist_prev_R = None
+                mid_prev_R = None
 
                 for k in range(seg_len):
                     h = hands[k]
@@ -239,7 +255,15 @@ class AriaHandsOptimizer:
                         wr_z = np.cross(wr_x, wr_y)
                         wr_z /= (np.linalg.norm(wr_z) + 1e-6)
                         wr_y = np.cross(wr_z, wr_x)
-                        h.wrist_pose_opt_world[:3, :3] = np.column_stack([wr_x, wr_y, wr_z])
+                        wrist_R = np.column_stack([wr_x, wr_y, wr_z])
+                        wrist_R = self._limit_rotation_step(
+                            wrist_prev_R,
+                            wrist_R,
+                            float(getattr(self.cfg, "opt_w_limit", 0.0)),
+                            self.dt,
+                        )
+                        h.wrist_pose_opt_world[:3, :3] = wrist_R
+                        wrist_prev_R = wrist_R
 
                     # B. Update Smoothed Fingertips and MCP Bases
                     h.thumb_translation_opt_world = thumb_pos_opt[k]
@@ -272,6 +296,12 @@ class AriaHandsOptimizer:
                     mid_z /= (np.linalg.norm(mid_z) + 1e-6)
                     mid_y = np.cross(mid_z, mid_x)
                     mid_R_opt = np.column_stack([mid_x, mid_y, mid_z])
+                    mid_R_opt = self._limit_rotation_step(
+                        mid_prev_R,
+                        mid_R_opt,
+                        float(getattr(self.cfg, "opt_w_limit", 0.0)),
+                        self.dt,
+                    )
                     
                     h.midpoint_translation_opt_world = mid_pos_opt[k]
                     h.midpoint_pose_opt_world = np.eye(4)
@@ -285,6 +315,34 @@ class AriaHandsOptimizer:
                 self._assign_linear_vel_from_pos(hands, self.dt, key="midpoint")
                 self._assign_angular_vel_from_rot(hands, self.dt, key="wrist")
                 self._assign_angular_vel_from_rot(hands, self.dt, key="midpoint")
+
+    @staticmethod
+    def _limit_position_steps(positions: np.ndarray, speed_limit: float, dt: float) -> np.ndarray:
+        """Sequentially clamp translation increments to speed_limit * dt."""
+        result = np.asarray(positions, dtype=np.float64).copy()
+        if speed_limit <= 0.0 or dt <= 0.0 or len(result) < 2:
+            return result
+        max_step = speed_limit * dt
+        for i in range(1, len(result)):
+            delta = result[i] - result[i - 1]
+            distance = float(np.linalg.norm(delta))
+            if distance > max_step:
+                result[i] = result[i - 1] + delta * (max_step / distance)
+        return result
+
+    @staticmethod
+    def _limit_rotation_step(
+        previous: Optional[np.ndarray], current: np.ndarray, speed_limit: float, dt: float
+    ) -> np.ndarray:
+        """Clamp one SO(3) increment without changing its rotation axis."""
+        if previous is None or speed_limit <= 0.0 or dt <= 0.0:
+            return current
+        rotvec = R.from_matrix(previous.T @ current).as_rotvec()
+        angle = float(np.linalg.norm(rotvec))
+        max_angle = speed_limit * dt
+        if angle <= max_angle:
+            return current
+        return previous @ R.from_rotvec(rotvec * (max_angle / angle)).as_matrix()
 
 
     @staticmethod

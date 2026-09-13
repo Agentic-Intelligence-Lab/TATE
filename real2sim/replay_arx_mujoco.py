@@ -37,8 +37,8 @@ GRIPPER_JOINTS_BY_SIDE = {"right": RIGHT_GRIPPER_JOINTS, "left": LEFT_GRIPPER_JO
 ARX_LEFT_SLICE = slice(0, 7)
 ARX_RIGHT_SLICE = slice(7, 14)
 SIM_GRIPPER_MAX_M = 0.088
-REAL_GRIPPER_CLOSED = -3.4
-REAL_GRIPPER_OPEN = 0.1
+REAL_GRIPPER_OPEN = -3.4
+REAL_GRIPPER_CLOSED = 0.1
 EEF_STYLES = {
     "right": {
         "label": "right",
@@ -134,6 +134,11 @@ def _eef_scene_transforms(data: dict[str, Any]) -> dict[str, np.ndarray] | None:
 
 def load_eef_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
+    convention = data.get("eef_coordinate_convention") or {}
+    tcp_orientation_applied = bool(
+        convention.get("tcp_orientation_applied", False)
+        or convention.get("pose_semantics") == "arx_tcp"
+    )
 
     if "frames" in data:
         frames = data["frames"]
@@ -198,7 +203,12 @@ def load_eef_json(path: Path) -> dict[str, Any]:
                 quat[i] = R.from_matrix(pose[i, :3, :3]).as_quat()
         hands[side]["quat_xyzw"] = quat
 
-    return {"time_s": t, "hands": hands, "display_frame": locals().get("display_frame", "right_arm_base")}
+    return {
+        "time_s": t,
+        "hands": hands,
+        "display_frame": locals().get("display_frame", "right_arm_base"),
+        "tcp_orientation_applied": tcp_orientation_applied,
+    }
 
 
 def _first_npz_key(data: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray | None:

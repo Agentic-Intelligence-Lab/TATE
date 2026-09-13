@@ -1,0 +1,30 @@
+# Common defaults for manifest-driven TATE trajectory evaluation.
+# null inherits active_sides from the preprocessing experiment manifest.
+active_sides: null
+
+activity:
+  left:
+    expected_events: null
+    require_expected_events: false
+    allow_ambiguous_events: false
+  right:
+    expected_events: null
+    require_expected_events: false
+    allow_ambiguous_events: false
+
+alignment:
+  method: position_dtw          # position_dtw | normalized_time
+  sample_count: 200
+  sample_rate_hz: null          # set this instead of sample_count for a rate-based grid
+  max_invalid_gap_s: 0.25
+  dtw_window_ratio: null        # null is unconstrained; e.g. 0.25 is a Sakoe-Chiba window
+  segment:
+    start_event: null           # null means episode start
+    end_event: null             # null means episode end
+
+metrics:
+  anchors: null                 # null reports every event shared by the pair
+
+pairing:
+  policy: all_pairs
+  fixed_pairs: []

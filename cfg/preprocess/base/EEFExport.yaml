@@ -1,0 +1,20 @@
+# Robot-specific conversion performed after the reusable WiLoR cache stage.
+
+hand2gripper:
+  # Choices: finger_center (default), humanego, qwen.
+  # This controls the camera-frame hand axes and, for qwen, the target position.
+  mode: "finger_center"
+  grasp_close_ratio: 0.85
+  grasp_open_ratio: 0.90
+  grasp_min_frames: 10
+
+# These limits are applied to the exported TCP target, not to WiLoR keypoints.
+kinematic_limits:
+  linear_speed_m_s: 0.6
+  angular_speed_rad_s: 0.8
+
+tcp_orientation:
+  # The exporter first looks for a side-specific
+  # RealSenseD405.yaml:extra_transforms.T_tcp_in_hand.<side>. A missing side
+  # falls back to the legacy T_hand_to_ee @ T_ee_axis_correct product.
+  source: "camera_calibration.extra_transforms"

@@ -21,9 +21,9 @@ from typing import Optional
 import cv2
 import numpy as np
 import yaml
-from tqdm import tqdm
 
 from preprocess.AriaCamTypes import AriaCam, AriaCamData
+from preprocess.PipelineIO import build_wilor_cache, export_eef_from_cache, select_intrinsics, write_json
 from preprocess.WiLoRHands import WiLoRHandsGenerator
 import preprocess.WiLoRHands as WiLoRHandsModule
 from utils.utils_io import load_cfg
@@ -130,6 +130,10 @@ class Preprocess:
         export_video=True,
         export_gif=False,
         video_path: Optional[str] = None,
+        start_frame: int = 0,
+        max_frames: Optional[int] = None,
+        wilor_pretrained_dir: Optional[str] = None,
+        hand2gripper_mode: Optional[str] = None,
     ):
         self.mps_path = mps_path
         self.cfg_path = cfg_path
@@ -137,6 +141,14 @@ class Preprocess:
         self.export_video = export_video
         self.export_gif = export_gif
         self.video_path = video_path
+        self.start_frame = int(start_frame)
+        self.max_frames = None if max_frames is None else int(max_frames)
+        self.wilor_pretrained_dir = wilor_pretrained_dir
+        self.hand2gripper_mode = hand2gripper_mode
+        if self.start_frame < 0:
+            raise ValueError("start_frame must be >= 0")
+        if self.max_frames is not None and self.max_frames <= 0:
+            raise ValueError("max_frames must be > 0")
 
         self.master_cfg = _load_master_cfg(cfg_path)
         self.aria_hands_cfg_path = _resolve_cfg_path(
@@ -163,6 +175,11 @@ class Preprocess:
             self.master_cfg,
             "CameraCalibration_path",
             "./cfg/preprocess/base/RealSenseD405.yaml",
+        )
+        self.eef_export_cfg_path = _resolve_cfg_path(
+            self.master_cfg,
+            "EEFExport_path",
+            "./cfg/preprocess/base/EEFExport.yaml",
         )
         self.aria_cam_cfg = load_cfg(self.aria_cam_cfg_path)
         self.camera_calibration_cfg = _load_master_cfg(self.camera_calibration_cfg_path)
@@ -196,32 +213,18 @@ class Preprocess:
             print("[Camera] No calibration YAML loaded; using video default intrinsics/extrinsics.")
             return k, d, c2w
 
-        calib_w = _cfg_get(cfg, "resolution", "width")
-        calib_h = _cfg_get(cfg, "resolution", "height")
-        if calib_w and calib_h and (int(calib_w) != w or int(calib_h) != h):
-            print(f"[Warn] Calibration resolution {calib_w}x{calib_h} does not match video {w}x{h}.")
-
-        k_cfg = _cfg_matrix(
-            _first_cfg_value(cfg, [("intrinsics", "K"), ("intrinsics", "k"), ("K",), ("k",)]),
-            (3, 3),
-            "camera intrinsics K",
-        )
-        d_cfg = _cfg_vector(
-            _first_cfg_value(cfg, [("intrinsics", "d"), ("intrinsics", "D"), ("d",), ("D",)]),
-            "camera distortion d",
-        )
+        k_cfg, d_cfg, profile_name = select_intrinsics(cfg, w, h)
         c2w_cfg = _cfg_matrix(
             _first_cfg_value(cfg, [("extrinsics", "c2w"), ("c2w",)]),
             (4, 4),
             "camera extrinsics c2w",
         )
 
-        if k_cfg is not None:
-            k = k_cfg
-            used_fields.append("K")
-        if d_cfg is not None:
-            d = d_cfg
-            used_fields.append("d")
+        k = k_cfg
+        d = d_cfg
+        used_fields.extend(["K", "d"])
+        self.camera_calibration_meta["intrinsics_profile"] = profile_name
+        self.camera_calibration_meta["video_resolution"] = [int(w), int(h)]
         if c2w_cfg is not None:
             c2w = c2w_cfg
             used_fields.append("c2w")
@@ -344,8 +347,13 @@ class Preprocess:
         aria_cam.d = d
         aria_cam.c2d = np.eye(4, dtype=np.float64)
 
-        idx = 0
+        if self.start_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
+        idx = self.start_frame
+        loaded = 0
         while True:
+            if self.max_frames is not None and loaded >= self.max_frames:
+                break
             ret, frame = cap.read()
             if not ret:
                 break
@@ -367,6 +375,7 @@ class Preprocess:
                 )
             )
             idx += 1
+            loaded += 1
         cap.release()
 
         if not aria_cam.cam:
@@ -531,42 +540,8 @@ class Preprocess:
             traceback.print_exc()
             return None, None, None, None
 
-    def _export_hand_keypoints_eef_video(
-        self,
-        aria_cam: AriaCam,
-        aria_hands,
-        generator: WiLoRHandsGenerator,
-        save_path: str,
-    ) -> None:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-        first = aria_cam.cam[0].img
-        h, w = first.shape[:2]
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(save_path, fourcc, float(aria_cam.fps), (w, h))
-        if not writer.isOpened():
-            raise RuntimeError("Failed to open output video writers")
-
-        for idx, cam_d in enumerate(tqdm(aria_cam.cam, desc="Export Hand Keypoints/EEF Video")):
-            data = aria_hands.hands[idx]
-            img = cam_d.img.copy()
-            img = WiLoRHandsModule.AriaHandsOps.draw_aria_hands_skeleton(
-                img,
-                data,
-                cam_d.k,
-                cam_d.d,
-                cam_d.c2w,
-                getattr(generator.cfg, "grasp_threshold", 0.105),
-                full_skeleton=True,
-            )
-            img = generator.draw_aria_hands_panel(img, idx, data)
-            writer.write(img)
-
-        writer.release()
-        print(f"[Output] Hand keypoints/EEF video saved to: {save_path}")
-
     @time_it
-    def run(self) -> None:
+    def run_wilor(self) -> str:
         aria_cam = self._build_aria_cam()
         print(f"[Input] Loaded {len(aria_cam.cam)} frames ({aria_cam.w}x{aria_cam.h}, {float(aria_cam.fps):.3f} FPS)")
 
@@ -574,18 +549,78 @@ class Preprocess:
         # side effect here so this command writes only the requested artifacts.
         WiLoRHandsModule.AriaHandsOps.save_hands_analysis_plots_two = staticmethod(lambda *args, **kwargs: None)
 
-        generator = WiLoRHandsGenerator(self.mps_path, self.aria_hands_cfg_path, aria_cam)
+        generator = WiLoRHandsGenerator(
+            self.mps_path,
+            self.aria_hands_cfg_path,
+            aria_cam,
+            wilor_pretrained_dir=self.wilor_pretrained_dir,
+            gripper_config=_load_master_cfg(self.eef_export_cfg_path),
+        )
         aria_hands = generator.get_aria_hands()
 
         output_dir = os.path.join(self.mps_path, "preprocess")
-        if self.export_video:
-            self._export_hand_keypoints_eef_video(
-                aria_cam,
-                aria_hands,
-                generator,
-                os.path.join(output_dir, "hand_keypoints_eef_vis.mp4"),
-            )
-        self._export_eef_json(aria_cam, aria_hands, os.path.join(output_dir, "eef.json"))
+        cache_path = os.path.join(output_dir, "wilor_hands.json")
+        cache = build_wilor_cache(
+            aria_cam,
+            aria_hands,
+            source_video=self.video_path,
+            calibration_meta=self.camera_calibration_meta,
+            wilor_meta={
+                "model_focal_length": float(generator.wilor_focal_length),
+                "hand_detector_confidence": float(getattr(generator.cfg, "wilor_hand_conf", 0.3)),
+                "swap_handedness": bool(getattr(generator.cfg, "swap_handedness", False)),
+                "pretrained_dir": self.wilor_pretrained_dir,
+            },
+            linear_speed_limit=float(getattr(generator.cfg, "opt_v_limit", 0.0)),
+            angular_speed_limit=float(getattr(generator.cfg, "opt_w_limit", 0.0)),
+        )
+        write_json(cache, cache_path)
+        print(f"[Output] WiLoR cache saved to: {cache_path}")
+        return cache_path
+
+    def run_cache_visualization(
+        self, cache_path: str, eef_path: Optional[str] = None
+    ) -> str:
+        if not self.video_path:
+            raise ValueError("Cache visualization requires an RGB --video_path")
+        from preprocess.visualize_wilor_cache import visualize_wilor_cache
+
+        output_path = os.path.join(
+            self.mps_path, "preprocess", "hand_keypoints_eef_vis.mp4"
+        )
+        visualize_wilor_cache(
+            self.video_path,
+            cache_path,
+            output_path,
+            eef_path=eef_path,
+            eef_config_path=self.eef_export_cfg_path,
+            hand2gripper_mode=self.hand2gripper_mode,
+        )
+        return output_path
+
+    @time_it
+    def run_eef(self, cache_path: Optional[str] = None) -> str:
+        cache_path = cache_path or os.path.join(self.mps_path, "preprocess", "wilor_hands.json")
+        output_path = os.path.join(self.mps_path, "preprocess", "eef.json")
+        payload = export_eef_from_cache(
+            cache_path,
+            self.camera_calibration_cfg_path,
+            output_path,
+            self.eef_export_cfg_path,
+            hand2gripper_mode=self.hand2gripper_mode,
+        )
+        valid_r = sum(frame["hand_r"] is not None for frame in payload["frames"])
+        valid_l = sum(frame["hand_l"] is not None for frame in payload["frames"])
+        print(f"[Output] EEF JSON saved to: {output_path}")
+        print(f"[Output] Valid right/left frames: {valid_r}/{valid_l} of {payload['total_frames']}")
+        return output_path
+
+    @time_it
+    def run(self) -> None:
+        cache_path = self.run_wilor()
+        eef_path = self.run_eef(cache_path)
+        if self.export_video and self.video_path:
+            self.run_cache_visualization(cache_path, eef_path)
 
 
 if __name__ == "__main__":
@@ -595,12 +630,23 @@ if __name__ == "__main__":
     parser.add_argument("--cfg_path", type=str, default="./cfg/preprocess/base/Preprocess.yaml")
     parser.add_argument("--task", type=str, default=None)
     parser.add_argument("--range", type=int, nargs=2, metavar=("START", "END"))
+    parser.add_argument("--stage", choices=("all", "wilor", "eef"), default="all")
+    parser.add_argument("--hands", default=None, help="WiLoR cache path for --stage eef")
+    parser.add_argument("--start-frame", type=int, default=0, help="First decoded video frame")
+    parser.add_argument("--max-frames", type=int, default=None, help="Optional frame limit for validation")
+    parser.add_argument("--wilor-pretrained-dir", default=None, help="Existing WiLoR checkpoint directory")
+    parser.add_argument(
+        "--hand2gripper-mode", choices=("finger_center", "humanego", "qwen"), default=None,
+        help="Override hand2gripper.mode in EEFExport.yaml",
+    )
     parser.add_argument("--no-video", action="store_false", dest="export_video", help="Disable MP4 video export")
     parser.add_argument("--no-gif", action="store_false", dest="export_gif", help="Ignored; kept for CLI compatibility")
     parser.set_defaults(export_video=True, export_gif=False)
     args = parser.parse_args()
 
-    if args.video_path or (os.path.isfile(args.mps_path) and args.mps_path.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))):
+    if args.stage == "eef":
+        final_tasks = [args.mps_path]
+    elif args.video_path or (os.path.isfile(args.mps_path) and args.mps_path.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))):
         final_tasks = [args.mps_path]
     elif os.path.exists(os.path.join(args.mps_path, "sample.vrs")):
         final_tasks = [args.mps_path]
@@ -611,16 +657,32 @@ if __name__ == "__main__":
         print("[Error] No valid task found.")
         raise SystemExit(1)
 
+    failed = False
     for path in final_tasks:
         try:
-            Preprocess(
+            runner = Preprocess(
                 mps_path=path,
                 cfg_path=args.cfg_path,
                 task=args.task,
                 export_video=args.export_video,
                 export_gif=args.export_gif,
                 video_path=args.video_path,
-            ).run()
+                start_frame=args.start_frame,
+                max_frames=args.max_frames,
+                wilor_pretrained_dir=args.wilor_pretrained_dir,
+                hand2gripper_mode=args.hand2gripper_mode,
+            )
+            if args.stage == "wilor":
+                cache_path = runner.run_wilor()
+                if args.export_video and runner.video_path:
+                    runner.run_cache_visualization(cache_path)
+            elif args.stage == "eef":
+                runner.run_eef(args.hands)
+            else:
+                runner.run()
         except Exception:
+            failed = True
             print(f"[Critical Error] Task failed: {path}")
             print(traceback.format_exc())
+    if failed:
+        raise SystemExit(1)

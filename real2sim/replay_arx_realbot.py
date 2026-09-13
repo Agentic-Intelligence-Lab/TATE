@@ -24,8 +24,10 @@ DEFAULT_SDK_ROOT = Path("../ARX5_beta")
 
 FPS = 30.0
 SIM_GRIPPER_MAX_M = 0.088
-SDK_GRIPPER_CLOSED = -3.4
-SDK_GRIPPER_OPEN = 0.1
+SDK_GRIPPER_OPEN = -3.4
+SDK_GRIPPER_CLOSED = 0.1
+SDK_GRIPPER_MIN = min(SDK_GRIPPER_OPEN, SDK_GRIPPER_CLOSED)
+SDK_GRIPPER_MAX = max(SDK_GRIPPER_OPEN, SDK_GRIPPER_CLOSED)
 
 LEFT_SLICE = slice(0, 7)
 RIGHT_SLICE = slice(7, 14)
@@ -65,7 +67,7 @@ def infer_gripper_from_npz_columns(columns: np.ndarray) -> np.ndarray:
         return sim_width_to_sdk_gripper(values[:, 0] + values[:, 1])
     values = values.reshape(-1)
     if np.nanmin(values) < -0.2 or np.nanmax(values) > 0.2:
-        return np.clip(values, SDK_GRIPPER_CLOSED, SDK_GRIPPER_OPEN)
+        return np.clip(values, SDK_GRIPPER_MIN, SDK_GRIPPER_MAX)
     return sim_width_to_sdk_gripper(values)
 
 
@@ -133,8 +135,8 @@ def load_parquet(path: Path) -> JointTrajectory:
     return JointTrajectory(
         time_s=time_s,
         sides={
-            "left": SideTrajectory(left[:, :6], np.clip(left[:, 6], SDK_GRIPPER_CLOSED, SDK_GRIPPER_OPEN)),
-            "right": SideTrajectory(right[:, :6], np.clip(right[:, 6], SDK_GRIPPER_CLOSED, SDK_GRIPPER_OPEN)),
+            "left": SideTrajectory(left[:, :6], np.clip(left[:, 6], SDK_GRIPPER_MIN, SDK_GRIPPER_MAX)),
+            "right": SideTrajectory(right[:, :6], np.clip(right[:, 6], SDK_GRIPPER_MIN, SDK_GRIPPER_MAX)),
         },
         source="parquet",
     )
@@ -176,9 +178,9 @@ def validate_trajectory(traj: JointTrajectory) -> None:
             value = data.arm_qpos[bad[0], bad[1]]
             raise RuntimeError(f"{side} joint {bad[1] + 1} frame {bad[0]} out of range: {value:.4f} rad")
         np.clip(data.arm_qpos, JOINT_LOWER, JOINT_UPPER, out=data.arm_qpos)
-        if np.any(data.gripper_pos < SDK_GRIPPER_CLOSED - RANGE_TOL) or np.any(data.gripper_pos > SDK_GRIPPER_OPEN + RANGE_TOL):
-            raise RuntimeError(f"{side} gripper command outside [{SDK_GRIPPER_CLOSED}, {SDK_GRIPPER_OPEN}]")
-        np.clip(data.gripper_pos, SDK_GRIPPER_CLOSED, SDK_GRIPPER_OPEN, out=data.gripper_pos)
+        if np.any(data.gripper_pos < SDK_GRIPPER_MIN - RANGE_TOL) or np.any(data.gripper_pos > SDK_GRIPPER_MAX + RANGE_TOL):
+            raise RuntimeError(f"{side} gripper command outside [{SDK_GRIPPER_MIN}, {SDK_GRIPPER_MAX}]")
+        np.clip(data.gripper_pos, SDK_GRIPPER_MIN, SDK_GRIPPER_MAX, out=data.gripper_pos)
 
 
 def duration_between(time_s: np.ndarray, i0: int, i1: int, speed: float) -> float:

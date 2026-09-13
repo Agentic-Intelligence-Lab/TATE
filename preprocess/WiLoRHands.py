@@ -60,6 +60,7 @@ from preprocess.AriaHandsTypes import (
 )
 from preprocess.AriaHandsOptimizer import AriaHandsOptimizer
 from preprocess.AriaHandsOps import AriaHandsOps
+from preprocess.Hand2Gripper import FingerCenter, debounce_grasp
 
 # Graceful import of wilor_mini
 try:
@@ -142,13 +143,34 @@ def remap_wilor_to_aria(kpts_wilor_21: np.ndarray) -> np.ndarray:
     return kpts_aria
 
 
+def principal_point_shear(k: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Map WiLoR's image-centred camera coordinates to calibrated K."""
+    fx, fy = float(k[0, 0]), float(k[1, 1])
+    cx, cy = float(k[0, 2]), float(k[1, 2])
+    return np.asarray(
+        [
+            [1.0, 0.0, (0.5 * width - cx) / fx],
+            [0.0, 1.0, (0.5 * height - cy) / fy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
 class WiLoRHandsGenerator:
     """
     Generates Aria-compatible hand tracking data using WiLoR.
     Produces the same AriaHands data structure and JSON format for seamless integration.
     """
 
-    def __init__(self, mps_path: str, cfg_path: str, aria_cam: AriaCam):
+    def __init__(
+        self,
+        mps_path: str,
+        cfg_path: str,
+        aria_cam: AriaCam,
+        wilor_pretrained_dir: Optional[str] = None,
+        gripper_config: Optional[dict] = None,
+    ):
         if not _WILOR_AVAILABLE:
             raise ImportError(
                 "wilor_mini is not installed. Please install it with:\n"
@@ -159,12 +181,28 @@ class WiLoRHandsGenerator:
         self.mps_path = mps_path
         self.cfg = load_cfg(cfg_path)
         self.aria_cam = aria_cam
+        hand2gripper = (gripper_config or {}).get("hand2gripper") or {}
+        self.grasp_close_ratio = hand2gripper.get("grasp_close_ratio")
+        self.grasp_open_ratio = hand2gripper.get("grasp_open_ratio")
+        self.grasp_min_frames = hand2gripper.get("grasp_min_frames")
 
         # WiLoR Pipeline
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         dtype = torch.float16 if device.type == "cuda" else torch.float32
-        self.wilor_pipe = WiLorHandPose3dEstimationPipeline(
-            device=device, dtype=dtype, verbose=False
+        real_focal_px = float(aria_cam.k[0, 0] + aria_cam.k[1, 1]) * 0.5
+        self.wilor_focal_length = real_focal_px * 256.0 / max(aria_cam.w, aria_cam.h)
+        pipeline_kwargs = {
+            "device": device,
+            "dtype": dtype,
+            "verbose": False,
+            "focal_length": self.wilor_focal_length,
+        }
+        if wilor_pretrained_dir:
+            pipeline_kwargs["wilor_pretrained_dir"] = wilor_pretrained_dir
+        self.wilor_pipe = WiLorHandPose3dEstimationPipeline(**pipeline_kwargs)
+        print(
+            f"[WiLoR] device={device}, model focal_length={self.wilor_focal_length:.3f} "
+            f"for {aria_cam.w}x{aria_cam.h}"
         )
 
         # Caches for velocity computation
@@ -219,27 +257,13 @@ class WiLoRHandsGenerator:
             #     }
             #   }
             # ----------------------------------------------------------
-            # ── Extract YOLO detection scores ──────────────────────────
-            # The WiLoR pipeline discards YOLO confidence scores internally,
-            # so we run the detector separately to capture them.
-            _cls_best_conf = {}  # {class_id: best_confidence}  class: 0=left, 1=right
             try:
-                _yolo_res = self.wilor_pipe.hand_detector(
-                    img_bgr, conf=0.3, verbose=False
-                )[0]
-                for _yd in _yolo_res:
-                    _bd = _yd.boxes.data.cpu().numpy().squeeze()
-                    if _bd.ndim >= 1 and _bd.shape[-1] >= 5:
-                        _cls_id = int(_yd.boxes.cls.cpu().item())
-                        _score = float(_bd[4])
-                        if _cls_id not in _cls_best_conf or _score > _cls_best_conf[_cls_id]:
-                            _cls_best_conf[_cls_id] = _score
-            except Exception:
-                pass
-
-            try:
-                detections = self.wilor_pipe.predict(img_bgr)
-            except Exception:
+                detections = self.wilor_pipe.predict(
+                    img_bgr,
+                    hand_conf=float(getattr(self.cfg, "wilor_hand_conf", 0.3)),
+                )
+            except Exception as exc:
+                print(f"[WiLoR] frame {cam_data.idx}: inference failed: {exc}")
                 detections = []
 
             hand_r = None
@@ -252,10 +276,6 @@ class WiLoRHandsGenerator:
 
                 raw_is_right_hand = bool(det.get("is_right", 1.0) >= 0.5)
                 is_right_hand = not raw_is_right_hand if getattr(self.cfg, "swap_handedness", False) else raw_is_right_hand
-                # Use YOLO detection score as primary confidence source
-                yolo_det_conf = _cls_best_conf.get(
-                    1 if raw_is_right_hand else 0, None
-                )
 
                 # Shape: (1, 21, 2) → (21, 2)
                 kpts_2d_wilor = np.array(
@@ -278,7 +298,11 @@ class WiLoRHandsGenerator:
                     joints_cam = kpts_3d_wilor + pred_cam_t[np.newaxis, :]
                     wrist_z = joints_cam[0, 2]
                     if 0.05 < wrist_z < 3.0:
-                        kpts_cam_wilor = joints_cam.astype(np.float32)
+                        # WiLoR's full-camera translation is relative to the
+                        # image centre. Re-express it for calibrated cx/cy.
+                        kpts_cam_wilor = (
+                            joints_cam @ principal_point_shear(k, w_img, h_img).T
+                        ).astype(np.float32)
                         used_learned_cam = True
 
                 # Fallback: pinhole back-projection if learned camera model unavailable or depth unreasonable
@@ -301,14 +325,9 @@ class WiLoRHandsGenerator:
                         kpts_2d_proj[:, 1] = kpts_cam_wilor[:, 1] / kpts_cam_wilor[:, 2] * fl + h_img / 2.0
                     kpts_2d_wilor = kpts_2d_proj
 
-                # Confidence: use YOLO detection score (primary, from hand detector)
-                # Fallback to reproj-based confidence if YOLO score unavailable
-                if yolo_det_conf is not None:
-                    confidence = float(yolo_det_conf)
-                else:
-                    confidence = self._compute_reproj_confidence(
-                        kpts_cam_wilor, kpts_2d_orig, k, h_img, w_img
-                    )
+                confidence = self._compute_reproj_confidence(
+                    kpts_cam_wilor, kpts_2d_orig, k, h_img, w_img
+                )
 
                 # Remap to Aria ordering
                 kpts_cam_aria = remap_wilor_to_aria(kpts_cam_wilor)
@@ -322,6 +341,10 @@ class WiLoRHandsGenerator:
                     c2w, k, h_img, w_img,
                     is_right=is_right_hand,
                 )
+                h_data.depth_source = (
+                    "pred_cam_t_full" if used_learned_cam else "intrinsics_wrist_middle_mcp_scale"
+                )
+                h_data.principal_point_corrected = bool(used_learned_cam)
 
                 if is_right_hand:
                     if hand_r is None or confidence > (hand_r.confidence if hand_r else 0):
@@ -339,12 +362,10 @@ class WiLoRHandsGenerator:
         self._filter_by_confidence(aria_hands, conf_th=0.3)
         self._suppress_short_hands(aria_hands, min_frames=self.cfg.hand_min_frames)
         self._interpolate_hand_trajectories(aria_hands, max_gap=self.cfg.hand_interp_max_gap)
-        self._smooth_grasp_detection(aria_hands, size=self.cfg.grasp_smooth_win)
-
         # Phase 3: Kinematic optimization
         optimizer = AriaHandsOptimizer(self.cfg, dt)
         optimizer.run(aria_hands)
-        self._smooth_grasp_detection(aria_hands, size=self.cfg.grasp_smooth_win)
+        self._apply_gripper_state_logic(aria_hands)
 
         # Phase 4: Reports
         os.makedirs(os.path.join(self.mps_path, "preprocess"), exist_ok=True)
@@ -742,6 +763,46 @@ class WiLoRHandsGenerator:
                 hand = getattr(h, attr)
                 if hand:
                     hand.grasp_state = int(g[i])
+
+    def _apply_gripper_state_logic(self, aria_hands: AriaHands) -> None:
+        """Apply the EEF exporter grasp hysteresis to the reconstructed hands."""
+        converters = {
+            "hand_r": FingerCenter(
+                self.grasp_close_ratio,
+                self.grasp_open_ratio,
+                self.grasp_min_frames,
+            ),
+            "hand_l": FingerCenter(
+                self.grasp_close_ratio,
+                self.grasp_open_ratio,
+                self.grasp_min_frames,
+            ),
+        }
+        for hand_key, is_right in (("hand_r", True), ("hand_l", False)):
+            converter = converters[hand_key]
+            for frame in aria_hands.hands:
+                hand = getattr(frame, hand_key)
+                if hand is None:
+                    continue
+                target = converter.from_hand_record(
+                    {
+                        "keypoints_3d_cam": hand.hand_keypoints_3d,
+                        "confidence": hand.confidence,
+                    },
+                    is_right=is_right,
+                )
+                if target is not None:
+                    hand.grasp_state = target.grasp_state
+
+            states = [
+                None if getattr(frame, hand_key) is None else getattr(frame, hand_key).grasp_state
+                for frame in aria_hands.hands
+            ]
+            fixed, _ = debounce_grasp(states, converter.grasp_min_frames)
+            for frame, state in zip(aria_hands.hands, fixed):
+                hand = getattr(frame, hand_key)
+                if hand is not None:
+                    hand.grasp_state = int(state)
 
     # ==================================================================
     # Visualization (delegate to AriaHandsOps)

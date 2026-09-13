@@ -16,6 +16,25 @@ intrinsics:
   # Distortion coefficients accepted by OpenCV projectPoints, e.g. [k1, k2, p1, p2, k3]
   distortion_model: "inverse_brown_conrady"
   d: [-0.04893810302019119, 0.05839170143008232, 0.001140566891990602, 0.0009892762172967196, -0.020692436024546623]
+  # Exact stream profiles. Preprocessing selects by decoded video resolution
+  # and refuses implicit scaling, especially across different aspect ratios.
+  profiles:
+    "1280x720":
+      K:
+        - [657.06060791, 0.0, 643.96606445]
+        - [0.0, 656.76757812, 353.84866333]
+        - [0.0, 0.0, 1.0]
+      d: [-0.04893810302019119, 0.05839170143008232, 0.001140566891990602, 0.0009892762172967196, -0.020692436024546623]
+      source: "calibration/configs/d405_head_1280x720_intrinsics.json"
+    "640x480":
+      # Factory stream profile used by the current LeRobot recordings. These
+      # values were preserved in TATE's pre-calibration D405 configuration.
+      K:
+        - [393.030548, 0.0, 312.918335]
+        - [0.0, 392.679291, 240.937149]
+        - [0.0, 0.0, 1.0]
+      d: [-0.05060414, 0.05627556, 0.00079493, 0.00094071, -0.01816789]
+      source: "TATE RealSenseD405.yaml before commit c26f178"
 
 extrinsics:
   # Legacy nominal camera-to-scene transform. Arm-specific processing prefers
@@ -94,6 +113,24 @@ arm_extrinsics:
       reprojection_rmse_px: 0.30809731076586006
 
 extra_transforms:
+  # Direct hand-frame -> ARX TCP mappings used by the EEF export stage.
+  # finger_center axes use handedness-specific jaw/up signs:
+  # right TCP=[hand forward, -hand jaw, hand up];
+  # left  TCP=[hand forward,  hand jaw, -hand up].
+  T_tcp_in_hand:
+    right:
+      - [0.0, -1.0, 0.0, 0.0]
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, 0.0, 1.0, 0.0]
+      - [0.0, 0.0, 0.0, 1.0]
+    left:
+      - [0.0, 1.0, 0.0, 0.0]
+      - [1.0, 0.0, 0.0, 0.0]
+      - [0.0, 0.0, -1.0, 0.0]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  # Legacy Nero decomposition. EEF export uses this product only for a side
+  # without an explicit T_tcp_in_hand entry.
   T_hand_to_ee:
     - [-1.0, 0.0, 0.0, 0.0]
     - [0.0, 0.0, 1.0, 0.0]

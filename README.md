@@ -7,24 +7,57 @@ All generated results should be written under `outputs/`.
 
 ## Preprocess
 
-Video -> WiLoR hand keypoints video + EEF JSON.
+Video preprocessing is split into a reusable WiLoR reconstruction and a cheap
+camera-to-arm EEF export.
 
 ```bash
-python -m preprocess.Preprocess \
-  --mps_path outputs/test \
-  --video_path DATA/arx_ego_dataset/test.mp4 \
-  --cfg_path cfg/preprocess/base/Preprocess.yaml \
-  --task serve_bread \
-  --no-gif
+python -m preprocess.reconstruct_wilor \
+  --video DATA/arx_ego_dataset/test.mp4 \
+  --session outputs/test \
+  --cfg cfg/preprocess/base/Preprocess.yaml
+
+python -m preprocess.export_eef \
+  --hands outputs/test/preprocess/wilor_hands.json \
+  --camera-calibration cfg/preprocess/base/RealSenseD405.yaml \
+  --eef-config cfg/preprocess/base/EEFExport.yaml \
+  --out outputs/test/preprocess/eef.json
+
+# Select a mode without editing the config (finger_center, humanego, qwen):
+# add --hand2gripper-mode humanego to the export command.
+
+python -m preprocess.visualize_wilor_cache \
+  --video DATA/arx_ego_dataset/test.mp4 \
+  --hands outputs/test/preprocess/wilor_hands.json \
+  --eef outputs/test/preprocess/eef.json \
+  --eef-config cfg/preprocess/base/EEFExport.yaml \
+  --out outputs/test/preprocess/wilor_eef_vis.mp4
 
 # Outputs:
-# outputs/test/preprocess/hand_keypoints_eef_vis.mp4
+# outputs/test/preprocess/wilor_hands.json
 # outputs/test/preprocess/eef.json
 
 # Notes:
-# `--task` is kept for HumanEgo CLI compatibility and does not affect the current mp4 WiLoR pipeline.
-# EEF JSON uses each arm's zero-position flange frame: z-up, +x forward, +y left.
+# EEF JSON uses each arm's zero-position flange frame and already stores ARX TCP orientation.
 ```
+
+See `preprocess/README.md` for frame-limited validation and the compatibility
+`preprocess.Preprocess` entry point.
+
+## Batch preprocessing, correction, and evaluation
+
+The manifest-driven batch runner keeps WiLoR caches, Hand2Gripper variants,
+real-anchor correction variants, IK, and derived LeRobot datasets separate and
+reproducible. See [preprocess/BATCH_PREPROCESS.md](preprocess/BATCH_PREPROCESS.md).
+
+Real ARX calibration fitting, optional camera-ray/XYZ anchor correction,
+task-level SO(3) correction, timestamp-based alignment, DTW, and held-out
+evaluation are documented in [evaluation/README.md](evaluation/README.md). The
+machine-readable boundary between preprocessing and evaluation is
+[ALIGNMENT_EVAL_INTERFACE.md](ALIGNMENT_EVAL_INTERFACE.md).
+
+Evaluation reads trajectory timestamps from EEF/LeRobot data and does not infer
+them from MP4 duration or frame count. Video/timestamp repair therefore remains
+a preprocessing responsibility.
 
 ## Retarget
 

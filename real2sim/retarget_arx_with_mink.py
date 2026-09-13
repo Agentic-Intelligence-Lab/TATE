@@ -37,14 +37,6 @@ SIDE_SPECS = {
     },
 }
 GRIPPER_OPEN_WIDTH_M = 0.088
-HAND_TO_TCP_ROT = np.asarray(
-    [
-        [0.0, 0.0, -1.0],
-        [1.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0],
-    ],
-    dtype=np.float64,
-)
 
 mujoco = None
 
@@ -126,12 +118,6 @@ def se3_from_matrix(mink, pose: np.ndarray):
     )
 
 
-def hand_pose_to_tcp_pose(hand_pose: np.ndarray) -> np.ndarray:
-    tcp_pose = np.asarray(hand_pose, dtype=np.float64).copy()
-    tcp_pose[:3, :3] = tcp_pose[:3, :3] @ HAND_TO_TCP_ROT
-    return tcp_pose
-
-
 def set_gripper(data, spec: dict[str, Any], gripper_addrs: np.ndarray, act_ids: dict[str, int], grasp: int) -> np.ndarray:
     width = 0.0 if int(grasp) > 0 else GRIPPER_OPEN_WIDTH_M
     qpos = np.asarray([0.5 * width, 0.5 * width], dtype=np.float64)
@@ -165,7 +151,15 @@ def posture_task(mink, model, q_target: np.ndarray, active_dofs: np.ndarray, act
 
 def load_targets(eef_path: Path) -> dict[str, Any]:
     replay = load_eef_json(eef_path)
-    targets = {"time_s": np.asarray(replay["time_s"], dtype=np.float64), "sides": {}}
+    if not replay.get("tcp_orientation_applied", False):
+        raise RuntimeError(
+            "IK requires EEF targets with ARX TCP orientation already applied; "
+            "rerun preprocess.export_eef with the current pipeline"
+        )
+    targets = {
+        "time_s": np.asarray(replay["time_s"], dtype=np.float64),
+        "sides": {},
+    }
     for side in ("right", "left"):
         hand = replay["hands"][side]
         valid = np.asarray(hand["valid"], dtype=bool)
@@ -177,10 +171,8 @@ def load_targets(eef_path: Path) -> dict[str, Any]:
             "quat_xyzw": np.asarray(hand["quat_xyzw"], dtype=np.float64),
             "grasp": np.asarray(hand["grasp"], dtype=np.int32),
         }
-    if not targets["sides"]["right"]["valid"].any():
-        raise RuntimeError(f"No right-hand EEF targets found in {eef_path}")
-    if not targets["sides"]["left"]["valid"].any():
-        raise RuntimeError(f"No left-hand EEF targets found in {eef_path}")
+    if not any(targets["sides"][side]["valid"].any() for side in ("right", "left")):
+        raise RuntimeError(f"No left/right EEF targets found in {eef_path}")
     return targets
 
 
@@ -314,7 +306,7 @@ def solve_side(
                 q_base=q_base,
                 q_seed=q_warm,
                 q_ref=q_warm,
-                target_pose=hand_pose_to_tcp_pose(side_targets["pose"][i]),
+                target_pose=side_targets["pose"][i],
                 arm_addrs=arm_addrs,
                 gripper_addrs=gripper_addrs,
                 active_dofs=active_dofs,
@@ -436,7 +428,11 @@ def solve_trajectory(args: argparse.Namespace) -> Path:
 
     right = results["right"]
     left = results["left"]
-    combined_success = right["success"] & (~left["valid"] | left["success"])
+    combined_success = (
+        (~right["valid"] | right["success"])
+        & (~left["valid"] | left["success"])
+        & (right["valid"] | left["valid"])
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(

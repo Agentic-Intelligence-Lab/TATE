@@ -1,91 +1,248 @@
-# WiLoR hand and dual-arm EEF preprocessing
+# Ego preprocessing
 
-The RGB pipeline has three independent stages:
+This directory converts ego RGB into dual-arm TCP trajectories expressed in
+robot coordinates. It also supports real-data correction, IK, diagnostic
+visualization, and packaging derived LeRobot training datasets.
 
-1. ego RGB -> camera-frame WiLoR hand cache;
-2. hand cache -> poses in the left/right ARX zero-flange frames;
-3. video + cache (+ optional EEF) -> diagnostic visualization video.
+There are two entry points:
 
-The split is intentional: WiLoR inference is expensive, while camera
-extrinsics and downstream correction may change repeatedly. Stage 2 can be
-rerun without invoking WiLoR.
+- single-episode debugging with separate WiLoR, EEF export, and visualization
+  commands;
+- manifest-driven batch experiments over all episodes and configured variants.
 
-## Single-episode validation
+See [BATCH_PREPROCESS.md](BATCH_PREPROCESS.md) for the batch configuration,
+cache fingerprints, manifests, and output contract. See
+[../calibration/README.md](../calibration/README.md) for camera calibration.
 
-From the repository root:
+## Data flow
+
+```text
+ego RGB
+  └─ WiLoR reconstruction ──> wilor_hands.json (shared cache)
+       └─ Hand2Gripper ─────> eef_raw.json (robot-frame TCP)
+            ├─ correction ──> eef.json
+            ├─ visualization -> wilor_eef_vis.mp4
+            └─ retarget ────> ik.npz
+                                 └─ package -> LeRobot dataset
+```
+
+WiLoR inference is the expensive stage, so it is isolated from downstream
+processing. Changing Hand2Gripper, camera extrinsics, TCP definitions,
+correction, or IK parameters does not rerun a still-valid WiLoR cache.
+
+## Environment and base configuration
+
+Run all commands from the TATE repository root:
 
 ```bash
+cd /home/xule/le_ws/TATE
 PY=/home/xule/miniconda3/envs/lifego/bin/python
+```
+
+The main configuration files are:
+
+- `cfg/preprocess/base/Preprocess.yaml`: WiLoR and preprocessing submodules;
+- `cfg/preprocess/base/RealSenseD405.yaml`: camera intrinsics, per-arm
+  extrinsics, and TCP transforms;
+- `cfg/preprocess/base/EEFExport.yaml`: default Hand2Gripper, grasp hysteresis,
+  and kinematic limits;
+- `cfg/preprocess/batch/*.yaml`: batch experiments, variants, correction, IK,
+  and packaging.
+
+## Single-episode debugging
+
+The following example uses the first `stack_cube` video. This workflow is
+intended for inspecting detections, coordinate axes, and gripper state; it does
+not create an experiment manifest.
+
+```bash
 VIDEO=/home/xule/le_ws/Data_TATE/stack_cube_ego/videos/observation.images.head/chunk-000/file-000.mp4
 SESSION=outputs/stack_cube_ego_ep000
+```
 
+### 1. Reconstruct the WiLoR cache
+
+```bash
 $PY -m preprocess.reconstruct_wilor \
   --video "$VIDEO" \
   --session "$SESSION" \
   --cfg cfg/preprocess/base/Preprocess.yaml \
   --wilor-pretrained-dir /home/xule/le_ws/LifEgo/.cache/wilor_mini
+```
 
+Add `--max-frames 40` for a short smoke run.
+
+### 2. Export EEF from the cache
+
+```bash
 $PY -m preprocess.export_eef \
   --hands "$SESSION/preprocess/wilor_hands.json" \
   --camera-calibration cfg/preprocess/base/RealSenseD405.yaml \
   --eef-config cfg/preprocess/base/EEFExport.yaml \
+  --hand2gripper-mode finger_center \
+  --grasp-mode finger_center \
+  --arm-mode single_arm \
+  --active-sides right \
   --out "$SESSION/preprocess/eef.json"
+```
 
+`--hand2gripper-mode` controls TCP position and orientation and accepts
+`finger_center`, `humanego`, or `qwen`. `--grasp-mode` independently controls
+the grasp ratio and hysteresis state. Pose ablations should use the same
+`grasp_mode` so that all pose modes share identical grasp events.
+
+### 3. Visualize WiLoR, TCP, and grasp state
+
+```bash
 $PY -m preprocess.visualize_wilor_cache \
   --video "$VIDEO" \
   --hands "$SESSION/preprocess/wilor_hands.json" \
   --eef "$SESSION/preprocess/eef.json" \
   --eef-config cfg/preprocess/base/EEFExport.yaml \
+  --hand2gripper-mode finger_center \
+  --grasp-mode finger_center \
   --out "$SESSION/preprocess/wilor_eef_vis.mp4"
 ```
 
-Add `--max-frames 40` to the first command for a short reconstruction run.
-Visualization is an independent cache consumer, so it can be rerun without
-WiLoR. Its panels show thumb-index distance, wrist-middle-MCP palm size,
-`grasp_ratio`, both hysteresis thresholds, the current band, and final state.
-Use `--grasp-close-ratio` and `--grasp-open-ratio` to preview candidate values.
+The overlay shows the grasp signal, open/close thresholds, hysteresis band,
+and final binary state. It only consumes cached results, so changing display
+parameters or previewing grasp thresholds does not rerun WiLoR.
 
-The compatibility orchestrator remains available:
-
-```bash
-$PY -m preprocess.Preprocess \
-  --mps_path "$SESSION" --video_path "$VIDEO" --stage all --no-video
-```
-
-`--stage wilor` and `--stage eef --hands PATH` run either half separately.
-
-## Outputs
+Single-episode outputs are written as:
 
 ```text
-<session>/preprocess/
-├── wilor_hands.json              # reusable, camera-frame reconstruction
-├── eef.json                      # dual-arm zero-flange-frame targets
-└── hand_keypoints_eef_vis.mp4    # optional overlay
+outputs/stack_cube_ego_ep000/preprocess/
+├── wilor_hands.json
+├── eef.json
+└── wilor_eef_vis.mp4
 ```
 
-`wilor_hands.json` records the exact intrinsic profile, WiLoR focal length,
-handedness policy, and depth source. `eef.json` records both calibrated
-`T_cam_in_*_arm_base` matrices and the transforms actually applied.
+The compatibility entry point `python -m preprocess.Preprocess` remains
+available, but new experiments should prefer the split commands above or the
+batch runner.
 
-The EEF stage reconstructs the selected LifEgo hand-to-gripper frame directly
-from cached 3D keypoints. Set `hand2gripper.mode` in `EEFExport.yaml` (or pass
-`--hand2gripper-mode`) to `finger_center`, `humanego`, or `qwen`.
-`finger_center` uses the thumb-to-index MCP jaw axis plus a wrist-to-four-finger
-MCP-centroid forward seed; `humanego` uses the original wrist-to-thumb/index-MCP
-midpoint seed; `qwen` uses Qwen-RobotManip's 0.7 index + 0.3 middle virtual tip.
-It computes grasp state with the configured close/open hysteresis band, then
-applies the side-specific `T_tcp_in_hand` from the camera calibration. A side
-without an explicit matrix falls back to `T_hand_to_ee @ T_ee_axis_correct`.
-The current right-hand matrix maps TCP axes to hand
-`[forward, -jaw, up]`, so `tcp_pose_eef_frame` already has the ARX real-robot
-TCP direction convention. The compatibility alias
-`eef_pose_world` contains the same pose in the per-hand `right_flange_zero` or
-`left_flange_zero` frame. Retargeting requires this TCP-ready representation
-and applies no additional orientation correction.
+## Batch preprocessing
 
-## Calibration safety
+The batch entry point reads a LeRobot ego dataset and uses an experiment YAML
+to produce multiple reproducible Hand2Gripper/correction variants:
 
-Intrinsics are selected by the decoded video resolution. Automatic scaling is
-not used: a 16:9-to-4:3 change may crop the sensor and cannot safely be inferred
-from width and height alone. The current D405 YAML contains exact 1280x720 and
-640x480 profiles.
+```bash
+$PY -m preprocess.batch_preprocess --config <batch-config.yaml>
+```
+
+The main examples are:
+
+- `cfg/preprocess/batch/stack_cube_h2g_ablation.yaml`: right-arm task;
+- `cfg/preprocess/batch/stack_cola_h2g_ablation.yaml`: bimanual task;
+- `cfg/preprocess/batch/stack_*_correction_ablation.yaml`: position and
+  orientation correction ablations.
+
+### Batch stages
+
+Omitting `--stages` is equivalent to `--stages all`.
+
+| Stage | Input | Purpose and output |
+| --- | --- | --- |
+| `wilor` | ego RGB | Reconstruct both hands into shared `wilor_hands.json` caches |
+| `eef` | WiLoR cache | Produce `eef_raw.json` for each Hand2Gripper variant |
+| `correct` | raw EEF | Produce final `eef.json` for each run; `none` is the identity variant |
+| `retarget` | final EEF | Solve ARX joint trajectories with MuJoCo/Mink into `ik.npz` |
+| `visualize` | RGB + cache + raw EEF | Render a diagnostic MP4 per H2G and episode |
+| `package` | final EEF + optional IK | Create a derived LeRobot dataset per final run |
+
+### Recommended workflow
+
+First validate dataset discovery, episode ranges, and temporal trimming without
+creating outputs:
+
+```bash
+$PY -m preprocess.batch_preprocess \
+  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
+  --dry-run
+```
+
+Then process one episode without packaging a temporary one-episode dataset:
+
+```bash
+$PY -m preprocess.batch_preprocess \
+  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
+  --episodes 0 \
+  --stages wilor,eef,correct,retarget,visualize
+```
+
+After checking visualization, EEF, and IK, run the complete dataset:
+
+```bash
+$PY -m preprocess.batch_preprocess \
+  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml
+```
+
+To reuse existing WiLoR caches and regenerate only downstream trajectories:
+
+```bash
+$PY -m preprocess.batch_preprocess \
+  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
+  --stages eef,correct,retarget
+```
+
+To render or resume only the visualization stage:
+
+```bash
+$PY -m preprocess.batch_preprocess \
+  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
+  --stages visualize
+```
+
+Add `--visualization-max-frames 100` for a short preview.
+
+### Selecting episodes and variants
+
+```bash
+# One episode, a list, an inclusive range, or a limited selection
+--episodes 0
+--episodes 0,3,7
+--episodes 10:15
+--episodes 10:15 --limit 2
+
+# Select runs[].id, not a hand2gripper_variants key
+--variants qwen_hys085__none
+```
+
+A combined example is:
+
+```bash
+$PY -m preprocess.batch_preprocess \
+  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
+  --episodes 0:4 \
+  --variants finger_center_hys085__none,qwen_hys085__none \
+  --stages eef,correct,retarget,visualize
+```
+
+### Resume and failure handling
+
+Batch processing resumes by default. A stage is skipped only when its manifest
+status, signature, and output files all match. Use the following form to
+deliberately regenerate stages:
+
+```bash
+--force-stage eef,correct,retarget
+```
+
+Do not normally add `--fail-fast`. By default, an episode or variant failure is
+recorded in the manifest and processing continues. If an ego trajectory cannot
+satisfy the grasp events required by a correction artifact, that combination
+is marked `skipped` and is not retargeted. With
+`lerobot.require_all_episodes: false`, packaging includes the successful subset
+and records exclusions in dataset provenance.
+
+Use a new `experiment_id` after changing source data, processing semantics,
+calibration, or correction artifacts. An experiment ID must never mix
+incompatible results.
+
+## Coordinate and calibration conventions
+
+Both `eef_raw.json` and `eef.json` already use the ARX TCP orientation; IK does
+not apply another orientation fix. Each side's `eef_pose_world` is expressed in
+its `left_flange_zero` or `right_flange_zero` frame. Camera intrinsics are
+selected by exact video resolution and are not scaled automatically. Recheck
+`RealSenseD405.yaml` after changing the camera, resolution, or crop policy.

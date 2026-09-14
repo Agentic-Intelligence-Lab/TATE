@@ -1,102 +1,66 @@
-# TATE alignment, real-anchor correction, and evaluation
+# TATE trajectory evaluation
 
-This implementation targets `ALIGNMENT_EVAL_INTERFACE.md`. It normalizes EEF
-sidecars, real ARX FK JSON, and derived LeRobot EEF columns into one dual-arm
-trajectory model before event extraction, timestamp resampling, alignment, or
-metrics.
+The evaluator compares preprocessed EEF variants with held-out ARX trajectories.
+It does not modify experiment artifacts. By default, every selected variant is
+evaluated on the same set of complete ego episodes.
 
-The migrated LifEgo logic retained here includes:
+## Evaluation protocol
 
-- gripper-transition anchors derived from signal direction rather than event parity;
-- evaluation strictly between each trajectory's first and last gripper events;
-- translation-based DTW with orientation evaluated along the position path;
-- held-out real-to-real leave-one-out noise floors;
-- the LifEgo metrics `rho_se3`, `D_pos_mm`, `rho_pos`, `D_rot_deg`, `rho_rot`,
-  `rho_offset`, `rho_shape`, and `eta_disp`.
+- Validate each arm's configured gripper-event sequence.
+- Evaluate only the trajectory between its first and last gripper events.
+- Align translation with position DTW and evaluate orientation on that path.
+- Compute held-out real-to-real leave-one-out noise floors.
+- Report the LifEgo metrics `rho_se3`, `D_pos_mm`, `rho_pos`, `D_rot_deg`,
+  `rho_rot`, `rho_offset`, `rho_shape`, and `eta_disp`.
 
-LifEgo-specific directory globbing, Nero TCP reconstruction, single-arm CSV,
-and implicit spatial fitting are intentionally not retained.
+Task-specific arms, event sequences, alignment settings, and real-data pairing
+are defined in `cfg/evaluation/*.yaml`. The real split must keep calibration and
+evaluation episode IDs disjoint.
 
-## 1. Fit a correction from calibration-only real episodes
+## Example: Stack Cola v2 (50 ego episodes)
 
-```bash
-python -m correction.fit \
-  --real-manifest /path/to/real_fk/manifest.json \
-  --real-split cfg/evaluation/splits/stack_cube_real_v1.json \
-  --eval-config cfg/evaluation/stack_cube_arx.yaml \
-  --out outputs/corrections/stack_cube_anchor_xyz.json
-```
-
-The artifact records every real calibration episode and the unused held-out
-episode IDs. It never modifies an EEF trajectory.
-
-`correction.anchors` accepts gripper-event ordinals together with `start` and
-`end`. Explicit endpoint anchors are fitted from the first/last valid real pose
-and override the propagation layer's legacy zero-displacement endpoint pins.
-
-Batch correction variants with `mode: pose_correction` may specify a position
-`artifact`, a `rotation_artifact`, or both. This supports clean none / position /
-rotation / position+rotation ablations without applying a dummy position fit.
-
-An optional task-level local rotation bias can be fitted from one uncorrected
-experiment variant against the same real calibration split:
+Run from the repository root:
 
 ```bash
-python -m correction.fit_rotation \
-  --experiment-manifest /path/to/experiment/manifest.json \
-  --variant finger_center__none \
-  --real-manifest /path/to/real_fk/manifest.json \
-  --real-split cfg/evaluation/splits/stack_cube_real_v1.json \
-  --eval-config cfg/evaluation/stack_cube_arx.yaml \
-  --out outputs/corrections/stack_cube_rotation.json
+cd /home/xule/le_ws/TATE
+
+PYTHONPATH=. /home/xule/miniconda3/envs/lifego/bin/python \
+  -m evaluation.run_eval \
+  --experiment-manifest outputs/experiments/stack_cola_v2_50/manifest.json \
+  --real-manifest outputs/arx_real_flange/stack_cola_arx/manifest.json \
+  --real-split cfg/evaluation/splits/stack_cola_real_v1.json \
+  --eval-config cfg/evaluation/stack_cola_arx.yaml \
+  --out outputs/evaluation/stack_cola_v2_50_lifego \
+  --resume
 ```
 
-The held-out real IDs are not loaded during fitting. Use at least two healthy
-ego episodes; the artifact records their IDs and the per-ego fit spread.
+This evaluates both manifest variants on both arms. With 50 ego episodes and
+10 held-out real episodes under `all_pairs`, each variant resolves 500 ego-real
+episode pairs. `--resume` is safe for a new output directory and skips compatible
+variant results already completed in an interrupted or previous run.
 
-## 2. Apply the fitted artifact as a new immutable EEF variant
+Append `--dry-run` to resolve and print the variants, common ego cohort, real
+split, active arms, and pair count without loading trajectories. Useful optional
+filters are:
 
-```bash
-python -m correction.apply \
-  --input /path/to/eef_raw.json \
-  --correction outputs/corrections/stack_cube_anchor_xyz.json \
-  --rotation-correction outputs/corrections/stack_cube_rotation.json \
-  --out /path/to/variant/eef.json \
-  --space free_xyz \
-  --propagation min_bending
+```text
+--variants VARIANT_ID ...   evaluate only named variants
+--episodes EPISODE_ID ...   use an explicit ego cohort
+--limit N                   use the first N resolved ego episodes for debugging
+--sides left right          override the active arms
+--segment first:last        override the evaluated event-bounded segment
 ```
 
-`linear`, `min_bending`, and `smooth_spline` propagation are available. Batch
-preprocessing owns the final variant path, fingerprint, and experiment manifest.
-`free_xyz` reproduces unconstrained anchor displacement; `ray_depth` moves each
-valid EEF point only along its calibrated camera ray. With `--target-mode
-sample`, targets use a stable per-episode/per-side/per-anchor seed;
-`--max-mahalanobis` optionally truncates outlier samples.
+If no `--variants` or `--episodes` are supplied, all manifest variants and their
+common complete episode cohort are used. Episodes failing loading, event-health,
+or alignment checks are recorded rather than silently discarded.
 
-## 3. Resolve an evaluation without loading trajectories
-
-```bash
-python -m evaluation.run_eval \
-  --experiment-manifest outputs/experiments/stack_cube_ablation_v1/manifest.json \
-  --variants finger_center__none finger_center__anchor_xyz \
-  --real-manifest outputs/cache/real_fk/stack_cube_arx/HASH/manifest.json \
-  --real-split cfg/evaluation/splits/stack_cube_real_v1.json \
-  --eval-config cfg/evaluation/stack_cube_arx.yaml \
-  --out outputs/evaluation/stack_cube_ablation_v1 \
-  --dry-run
-```
-
-The dry run prints the fixed common ego cohort, held-out real IDs, active arms,
-pair count, and output path.
-
-## 4. Run evaluation
-
-Remove `--dry-run` from the command above. Outputs follow the contract:
+## Outputs
 
 ```text
 eval_config_resolved.yaml
-comparison.json
 comparison.csv
+comparison.json
 real_to_real_noise_floor.json
 <variant>/summary.json
 <variant>/episodes.csv
@@ -104,9 +68,7 @@ real_to_real_noise_floor.json
 <variant>/alignments/<ego>__<real>__<side>.npz
 ```
 
-The task configs default to `--segment first:last`. Use `--episodes ...` for an
-explicit fixed ego cohort, and `--sides left right` for a bimanual task.
-`eta_disp` is a within-ego-set dispersion ratio, so it is reported as unavailable
-when fewer than two ego episodes are selected. Comparison tables use compact IDs
-such as `finger_center` and `finger_center+xyz`; `comparison.json` records their
-mapping to full manifest IDs.
+Use `comparison.csv` for the compact cross-variant table, `summary.json` for
+per-arm and bimanual aggregates, and `exclusions.json` to diagnose missing
+episodes or invalid event sequences. `eta_disp` requires at least two healthy
+ego episodes; otherwise it is reported as unavailable.

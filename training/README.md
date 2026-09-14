@@ -93,7 +93,7 @@ This writes stats under `outputs/openpi_assets/arx_eef/<repo-id>/`.
 
 ```bash
 cd thirdparty/openpi
-uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   ../../training/train_arx_eef_pytorch.py \
   --repo-id local/arx_eef_stack_cube_ego \
   --dataset-root ../../outputs/lerobot/local/arx_eef_stack_cube_ego \
@@ -126,3 +126,29 @@ outputs/openpi_assets/arx_eef/local/arx_eef_stack_cube_ego/
 ```
 
 The OpenPI `.venv` does not need to be copied. Recreate it on HPC with the OpenPI environment setup, and use `/mnt/workspace/sunxiaoquan/models/pi05_base` as `--pytorch-weight-path`.
+
+
+## 8. HPC Debug
+
+``` sh
+uv pip install pytest
+uv pip install git+https://github.com/huggingface/lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5
+uv pip install 'datasets>=2.16,<3'
+
+# Transformer库报错
+cd /mnt/data/yuanmingqi/code/TATE/thirdparty/openpi
+
+uv pip install transformers==4.53.2
+TRANSFORMERS_DIR=$(python - <<'PY'
+import pathlib, transformers
+print(pathlib.Path(transformers.__file__).resolve().parent)
+PY
+)
+
+cp -r ./src/openpi/models_pytorch/transformers_replace/* "$TRANSFORMERS_DIR"/
+
+python - <<'PY'
+from transformers.models.siglip import check
+print(check.check_whether_transformers_replace_is_installed_correctly())
+PY
+```

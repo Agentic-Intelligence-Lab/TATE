@@ -77,15 +77,13 @@ class ArxEefDataConfig(openpi_config.DataConfigFactory):
     """LeRobot DataConfig for three-camera ARX EEF training."""
 
     default_prompt: str | None = DEFAULT_TASK_PROMPT
+    # Kept only for legacy datasets which do not contain policy.image_mask.
+    # New cotrain datasets provide an availability mask per sample.
     mask_wrist_images: bool | None = None
 
     @override
     def create(self, assets_dirs: Path, model_config: _model.BaseModelConfig) -> openpi_config.DataConfig:
-        mask_wrist_images = (
-            self.mask_wrist_images
-            if self.mask_wrist_images is not None
-            else self.repo_id.endswith("_ego") or self.repo_id.endswith("_cotrain")
-        )
+        mask_wrist_images = bool(self.mask_wrist_images)
         repack_transform = transforms.Group(
             inputs=[
                 transforms.RepackTransform(
@@ -97,6 +95,7 @@ class ArxEefDataConfig(openpi_config.DataConfigFactory):
                         },
                         "state": "observation.state",
                         "actions": "action",
+                        "image_mask": "policy.image_mask",
                         "prompt": "prompt",
                     }
                 )

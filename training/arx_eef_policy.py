@@ -53,6 +53,16 @@ def _validate_vector(value, name: str) -> np.ndarray:
     return value
 
 
+def _validate_image_mask(value) -> np.ndarray:
+    """Validate [head, left, right] camera availability from the dataset."""
+    value = np.asarray(value, dtype=bool)
+    if value.shape != (3,):
+        raise ValueError(f"ARX image_mask must have shape (3,), got {value.shape}")
+    if not value[0]:
+        raise ValueError("ARX head camera must be available")
+    return value
+
+
 @dataclasses.dataclass(frozen=True)
 class ArxEefInputs(transforms.DataTransformFn):
     """Map ARX EEF LeRobot samples to OpenPI's three-camera observation format."""
@@ -71,6 +81,18 @@ class ArxEefInputs(transforms.DataTransformFn):
         left = _parse_image(images["cam_left_wrist"])
         right = _parse_image(images["cam_right_wrist"])
         state = _validate_vector(data["state"], "state")
+        dynamic_mask = (
+            _validate_image_mask(data["image_mask"])
+            if "image_mask" in data
+            else np.asarray([True, not self.mask_wrist_images, not self.mask_wrist_images])
+        )
+        # A false model mask is authoritative, but blacking the corresponding
+        # tensor also prevents a malformed downstream implementation from
+        # accidentally learning from a camera declared unavailable.
+        if not dynamic_mask[1]:
+            left = np.zeros_like(left)
+        if not dynamic_mask[2]:
+            right = np.zeros_like(right)
 
         if self.model_type == _model.ModelType.PI0_FAST:
             image = {
@@ -79,9 +101,9 @@ class ArxEefInputs(transforms.DataTransformFn):
                 "wrist_0_rgb": right,
             }
             image_mask = {
-                "base_0_rgb": np.True_,
-                "base_1_rgb": np.False_ if self.mask_wrist_images else np.True_,
-                "wrist_0_rgb": np.False_ if self.mask_wrist_images else np.True_,
+                "base_0_rgb": np.bool_(dynamic_mask[0]),
+                "base_1_rgb": np.bool_(dynamic_mask[1]),
+                "wrist_0_rgb": np.bool_(dynamic_mask[2]),
             }
         else:
             image = {
@@ -90,9 +112,9 @@ class ArxEefInputs(transforms.DataTransformFn):
                 "right_wrist_0_rgb": right,
             }
             image_mask = {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.False_ if self.mask_wrist_images else np.True_,
-                "right_wrist_0_rgb": np.False_ if self.mask_wrist_images else np.True_,
+                "base_0_rgb": np.bool_(dynamic_mask[0]),
+                "left_wrist_0_rgb": np.bool_(dynamic_mask[1]),
+                "right_wrist_0_rgb": np.bool_(dynamic_mask[2]),
             }
 
         inputs = {

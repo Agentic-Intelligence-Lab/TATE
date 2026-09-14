@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -31,9 +32,23 @@ from training.arx_eef_policy import ACTION_DIM
 DEFAULT_PI05_WEIGHT_PATH = "/mnt/workspace/sunxiaoquan/models/pi05_base"
 
 
-def _patch_pytorch_action_loss_dim(loss_action_dim: int) -> None:
+def dataset_action_mask(dataset_root: str | Path) -> list[bool]:
+    """Read the dataset-level 16-D loss mask written by our cotrain exporter."""
+    info_path = Path(dataset_root).expanduser() / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    mask = (info.get("arx_eef") or {}).get("default_action_mask")
+    if mask is None:
+        return [True] * ACTION_DIM
+    if not isinstance(mask, list) or len(mask) != ACTION_DIM:
+        raise ValueError(f"invalid arx_eef.default_action_mask in {info_path}")
+    if not any(mask):
+        raise ValueError(f"action mask in {info_path} masks every action dimension")
+    return [bool(value) for value in mask]
+
+
+def _patch_pytorch_action_loss(loss_action_dim: int, action_mask: list[bool]) -> None:
     if loss_action_dim <= 0:
-        return
+        raise ValueError("loss action dimension must be positive")
 
     from openpi.models_pytorch import pi0_pytorch
 
@@ -41,14 +56,22 @@ def _patch_pytorch_action_loss_dim(loss_action_dim: int) -> None:
     if getattr(original_forward, "_arx_eef_loss_patched", False):
         return
 
-    def forward_with_cropped_loss(self, observation, actions, noise=None, time=None):
+    def forward_with_masked_loss(self, observation, actions, noise=None, time=None):
         losses = original_forward(self, observation, actions, noise=noise, time=time)
-        if loss_action_dim >= losses.shape[-1]:
-            return losses
-        return losses[..., :loss_action_dim]
+        if losses.shape[-1] < loss_action_dim:
+            raise ValueError(f"model returned only {losses.shape[-1]} action losses")
+        losses = losses[..., :loss_action_dim]
+        import torch
+        active = torch.as_tensor(action_mask[:loss_action_dim], dtype=losses.dtype, device=losses.device)
+        active_count = active.sum()
+        if active_count <= 0:
+            raise ValueError("action mask has no active dimensions")
+        # OpenPI's outer loop calls mean().  Rescale so it remains the mean
+        # over active dimensions rather than being diluted by masked entries.
+        return losses * active * (loss_action_dim / active_count)
 
-    forward_with_cropped_loss._arx_eef_loss_patched = True
-    pi0_pytorch.PI0Pytorch.forward = forward_with_cropped_loss
+    forward_with_masked_loss._arx_eef_loss_patched = True
+    pi0_pytorch.PI0Pytorch.forward = forward_with_masked_loss
 
 
 def main() -> None:
@@ -69,6 +92,14 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--loss-action-dim", type=int, default=ACTION_DIM)
+    parser.add_argument(
+        "--action-mask",
+        nargs=ACTION_DIM,
+        type=int,
+        default=None,
+        metavar="MASK",
+        help="Optional 16-value 0/1 loss-mask override; defaults to dataset metadata.",
+    )
     args = parser.parse_args()
 
     if args.batch_size <= 0:
@@ -77,6 +108,8 @@ def main() -> None:
         raise ValueError(f"--loss-action-dim cannot exceed ARX EEF action dimension {ACTION_DIM}")
     if args.loss_action_dim > 32:
         raise ValueError("--loss-action-dim cannot exceed the model action dimension 32")
+    if args.action_mask is not None and any(value not in (0, 1) for value in args.action_mask):
+        raise ValueError("--action-mask values must be 0 or 1")
 
     weight_path = Path(args.pytorch_weight_path).expanduser()
     if not (weight_path / "model.safetensors").is_file():
@@ -107,7 +140,11 @@ def main() -> None:
     from scripts import train_pytorch as openpi_train_pytorch
 
     openpi_train_pytorch.init_logging()
-    _patch_pytorch_action_loss_dim(args.loss_action_dim)
+    action_mask = [bool(value) for value in args.action_mask] if args.action_mask is not None else dataset_action_mask(args.dataset_root)
+    if args.loss_action_dim != ACTION_DIM and not all(action_mask[args.loss_action_dim:]):
+        raise ValueError("--loss-action-dim cannot hide masked dimensions; use the 16-D default")
+    print(f"ARX EEF action loss mask: {[int(value) for value in action_mask]}")
+    _patch_pytorch_action_loss(args.loss_action_dim, action_mask)
     openpi_train_pytorch.train_loop(config)
 
 

@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""Materialize task-specific ARX ego/real cotrain datasets.
+"""Build directly trainable 16-D EEF ARX ego/real cotrain datasets.
 
-The source ego variant remains immutable.  This exporter creates a compact
-LeRobot-v3-style dataset per task with a common 14-D ARX joint space:
-
-    [left joints(6), left gripper, right joints(6), right gripper]
-
-``action`` is always the next source-frame state.  Single-arm episodes retain the
-14-D representation but zero inactive-arm state/action entries and expose
-per-dimension masks.  A policy trainer must apply ``policy.action_mask`` to
-its loss; zeros are placeholders, not supervision targets.
+The exporter reads immutable 14-D joint datasets and writes independent
+LeRobot v2.1 ``train`` and ``eval`` repositories.  State/action are:
+``[left xyz, xyzw, gripper, right xyz, xyzw, gripper]``.  Cube's absent left
+arm uses a canonical identity pose and false per-element state/action masks.
+Ego is head-only; real train can use reproducible camera dropout.
 """
 
 from __future__ import annotations
@@ -18,30 +14,33 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from scipy.spatial.transform import Rotation
 
-
-# This file lives at <workspace>/TATE/training/.
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = REPO_ROOT / "outputs" / "cotrain"
-VIDEO_KEYS = (
-    "observation.images.head",
-    "observation.images.left",
-    "observation.images.right",
-)
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from real_data.arx_lerobot_adapter import ArxForwardKinematics
+
+
+OUTPUT_ROOT = REPO_ROOT / "outputs" / "lerobot"
+DEFAULT_SCENE = REPO_ROOT / "assets" / "mujoco_arx_scene" / "scene.xml"
+DEFAULT_CALIBRATION = REPO_ROOT / "cfg" / "preprocess" / "base" / "RealSenseD405.yaml"
+VIDEO_KEYS = ("observation.images.head", "observation.images.left", "observation.images.right")
 IMAGE_MASK_NAMES = ["head", "left", "right"]
-JOINT_NAMES = [
-    *(f"left_joint_{i}" for i in range(1, 7)),
-    "left_gripper",
-    *(f"right_joint_{i}" for i in range(1, 7)),
-    "right_gripper",
+JOINT_DIM, EEF_DIM = 14, 16
+EEF_NAMES = [
+    "left_eef_x", "left_eef_y", "left_eef_z", "left_eef_qx", "left_eef_qy", "left_eef_qz", "left_eef_qw", "left_gripper",
+    "right_eef_x", "right_eef_y", "right_eef_z", "right_eef_qx", "right_eef_qy", "right_eef_qz", "right_eef_qw", "right_gripper",
 ]
+CANONICAL_ARM = np.asarray([0, 0, 0, 0, 0, 0, 1, 0], dtype=np.float32)
 
 
 @dataclass(frozen=True)
@@ -66,61 +65,46 @@ class TaskSpec:
 
 
 TASKS = {
-    "stack_cube": TaskSpec(
-        name="stack_cube",
-        experiment="stack_cube_h2g_ablation_v4",
-        variant="finger_center_hys085__xyz_mean_target_min_bending",
-        prompt="pick the cube and stack it on the blue plate",
-        active_sides=("right",),
-    ),
-    "stack_cola": TaskSpec(
-        name="stack_cola",
-        experiment="stack_cola_h2g_ablation_v4",
-        variant="finger_center_hys085__xyz_mean_target_min_bending",
-        prompt="pick two colas and stack them on the brown box",
-        active_sides=("left", "right"),
-    ),
+    "stack_cube": TaskSpec("stack_cube", "stack_cube_h2g_ablation_v4", "finger_center_hys085__xyz_mean_target_min_bending", "pick the cube and stack it on the blue plate", ("right",)),
+    "stack_cola": TaskSpec("stack_cola", "stack_cola_h2g_ablation_v4", "finger_center_hys085__xyz_mean_target_min_bending", "pick two colas and stack them on the brown box", ("left", "right")),
 }
 
 
-def read_json(path: Path) -> dict:
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def vector_mask(active_sides: tuple[str, ...]) -> np.ndarray:
-    mask = np.zeros(14, dtype=bool)
-    if "left" in active_sides:
-        mask[:7] = True
-    if "right" in active_sides:
-        mask[7:] = True
-    return mask
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def episode_files(dataset_root: Path) -> Iterable[Path]:
-    return sorted((dataset_root / "data" / "chunk-000").glob("file-*.parquet"))
+def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        for record in records:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def episode_files(root: Path) -> list[Path]:
+    paths = sorted((root / "data").rglob("file-*.parquet"))
+    if not paths:
+        raise FileNotFoundError(f"no source episode parquets under {root / 'data'}")
+    return paths
 
 
 def source_episode_index(table: pa.Table, path: Path) -> int:
-    ids = np.asarray(table["episode_index"].to_pylist(), dtype=np.int64)
-    if len(ids) == 0 or np.any(ids != ids[0]):
-        raise ValueError(f"{path} must contain exactly one non-empty episode")
-    return int(ids[0])
+    values = np.asarray(table["episode_index"].to_pylist(), dtype=np.int64)
+    if len(values) == 0 or np.any(values != values[0]):
+        raise ValueError(f"{path} must contain one non-empty episode")
+    return int(values[0])
 
 
-def valid_rows(table: pa.Table, *, source: str, active_sides: tuple[str, ...]) -> np.ndarray:
-    """Return t indices whose current and next state are usable."""
-    n = len(table)
-    keep = np.ones(n - 1, dtype=bool)  # drop final frame: no true next state
-    if source != "ego":
-        return keep
-    for side in active_sides:
-        key = f"tate.eef.{side}.valid"
-        if key not in table.column_names:
-            raise ValueError(f"ego table is missing required validity column {key!r}")
-        valid = np.asarray(table[key].to_pylist(), dtype=bool)
-        keep &= valid[:-1] & valid[1:]
-    return keep
+def source_video(root: Path, key: str, episode: int) -> Path:
+    path = root / "videos" / key / "chunk-000" / f"file-{episode:03d}.mp4"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
 
 
 def link_or_copy(source: Path, destination: Path) -> None:
@@ -131,232 +115,219 @@ def link_or_copy(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
-def source_video(dataset_root: Path, key: str, source_episode: int) -> Path:
-    path = dataset_root / "videos" / key / "chunk-000" / f"file-{source_episode:03d}.mp4"
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    return path
+def eef_mask(active_sides: tuple[str, ...]) -> np.ndarray:
+    mask = np.zeros(EEF_DIM, dtype=bool)
+    if "left" in active_sides:
+        mask[:8] = True
+    if "right" in active_sides:
+        mask[8:] = True
+    return mask
 
 
-def write_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+def valid_rows(table: pa.Table, source: str, active_sides: tuple[str, ...]) -> np.ndarray:
+    """Return t whose state at both t and t+1 is valid; always drops final t."""
+    keep = np.ones(len(table) - 1, dtype=bool)
+    if source == "ego":
+        for side in active_sides:
+            key = f"tate.eef.{side}.valid"
+            if key not in table.column_names:
+                raise ValueError(f"ego source is missing {key}")
+            valid = np.asarray(table[key].to_pylist(), dtype=bool)
+            keep &= valid[:-1] & valid[1:]
+    return keep
 
 
-def choose_real_image_masks(
-    count: int,
-    *,
-    camera_dropout: bool,
-    probabilities: np.ndarray,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Return [head, left, right] availability masks for real frames.
+def continuous_quaternions(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32).copy()
+    for index in range(len(values)):
+        norm = float(np.linalg.norm(values[index]))
+        if norm < 1e-8:
+            raise ValueError("FK produced zero quaternion")
+        values[index] /= norm
+        if index and float(np.dot(values[index - 1], values[index])) < 0:
+            values[index] *= -1
+    return values
 
-    The four probability entries correspond to full, head-only, head+left,
-    and head+right views.  Ego always has the fixed head-only mask.
-    """
-    if not camera_dropout:
+
+def joints_to_eef(joints: np.ndarray, fk: ArxForwardKinematics) -> np.ndarray:
+    joints = np.asarray(joints, dtype=np.float32)
+    if joints.ndim != 2 or joints.shape[1] != JOINT_DIM:
+        raise ValueError(f"expected N x {JOINT_DIM} joints, got {joints.shape}")
+    result = np.empty((len(joints), EEF_DIM), dtype=np.float32)
+    for index, row in enumerate(joints):
+        poses = fk.forward({"left": row[:6], "right": row[7:13]})
+        values: list[float] = []
+        for side, gripper_index in (("left", 6), ("right", 13)):
+            pose = poses[side]["tcp"]
+            quat = Rotation.from_matrix(pose[:3, :3]).as_quat()
+            # Recording convention: -3.4=open, 0.1=closed.
+            gripper = float(np.clip((row[gripper_index] + 3.4) / 3.5, 0, 1))
+            values.extend([*pose[:3, 3], *quat, gripper])
+        result[index] = values
+    for offset in (3, 11):
+        result[:, offset : offset + 4] = continuous_quaternions(result[:, offset : offset + 4])
+    if not np.all(np.isfinite(result)):
+        raise ValueError("non-finite result during FK")
+    return result
+
+
+def apply_arm_mask(values: np.ndarray, active_mask: np.ndarray) -> np.ndarray:
+    result = np.asarray(values, dtype=np.float32).copy()
+    if not active_mask[:8].any():
+        result[:, :8] = CANONICAL_ARM
+    if not active_mask[8:].any():
+        result[:, 8:] = CANONICAL_ARM
+    return result
+
+
+def choose_real_image_masks(count: int, dropout: bool, probabilities: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    if not dropout:
         return np.ones((count, 3), dtype=bool)
-    choices = rng.choice(4, size=count, p=probabilities)
     patterns = np.asarray(((1, 1, 1), (1, 0, 0), (1, 1, 0), (1, 0, 1)), dtype=bool)
-    return patterns[choices]
+    return patterns[rng.choice(4, size=count, p=probabilities)]
 
 
-def materialize(
-    spec: TaskSpec,
-    output_root: Path,
-    overwrite: bool,
-    *,
-    camera_dropout: bool,
-    camera_mask_probabilities: np.ndarray,
-    seed: int,
-) -> dict:
-    ego_info = read_json(spec.ego_root / "meta" / "info.json")
-    real_info = read_json(spec.real_root / "meta" / "info.json")
+def resolve_real_split(spec: TaskSpec, real_ids: set[int], args: argparse.Namespace) -> tuple[set[int], set[int], str]:
+    if args.real_train_ids is not None or args.real_eval_ids is not None:
+        if args.real_train_ids is None or args.real_eval_ids is None:
+            raise ValueError("provide both --real-train-ids and --real-eval-ids")
+        if not args.allow_correction_split_override:
+            raise ValueError("custom IDs require --allow-correction-split-override because calibration used a fixed real split")
+        train, eval_, description = set(args.real_train_ids), set(args.real_eval_ids), "manual episode IDs"
+    elif args.real_train_ratio is not None:
+        if not args.allow_correction_split_override:
+            raise ValueError("--real-train-ratio requires --allow-correction-split-override because calibration used a fixed real split")
+        if not 0 < args.real_train_ratio < 1:
+            raise ValueError("--real-train-ratio must be between zero and one")
+        values = np.asarray(sorted(real_ids), dtype=np.int64)
+        rng = np.random.default_rng(args.split_seed + sum(map(ord, spec.name)))
+        rng.shuffle(values)
+        count = min(max(1, round(len(values) * args.real_train_ratio)), len(values) - 1)
+        train, eval_ = set(map(int, values[:count])), set(map(int, values[count:]))
+        description = f"random ratio {args.real_train_ratio:g}, seed {args.split_seed}"
+    else:
+        correction = read_json(spec.correction_path)
+        train = set(map(int, correction["real_calibration_episode_ids"]))
+        eval_ = set(map(int, correction["real_eval_episode_ids_not_used"]))
+        description = f"correction artifact {spec.correction_path}"
+    if train & eval_ or train | eval_ != real_ids:
+        raise ValueError(f"split must partition real IDs {sorted(real_ids)}; got train={sorted(train)}, eval={sorted(eval_)}")
+    return train, eval_, description
+
+
+class DatasetWriter:
+    def __init__(self, root: Path, source_info: dict[str, Any], spec: TaskSpec, split: str, mode: str, active_mask: np.ndarray, split_source: str, overwrite: bool) -> None:
+        if root.exists():
+            if not overwrite:
+                raise FileExistsError(f"{root} exists; pass --overwrite")
+            shutil.rmtree(root)
+        self.root, self.source_info, self.spec = root, source_info, spec
+        self.split, self.mode, self.active_mask, self.split_source = split, mode, active_mask, split_source
+        (root / "data").mkdir(parents=True)
+        (root / "videos").mkdir(parents=True)
+        (root / "meta").mkdir(parents=True)
+        self.global_index = 0
+        self.episodes: list[dict[str, Any]] = []
+        self.provenance: list[dict[str, Any]] = []
+        self.states: list[np.ndarray] = []
+        self.actions: list[np.ndarray] = []
+        self.image_counts = {"head_left_right": 0, "head_only": 0, "head_left": 0, "head_right": 0}
+        self.counts = {"ego": {"episodes": 0, "frames": 0}, "real": {"episodes": 0, "frames": 0}}
+
+    def add(self, *, source: str, source_root: Path, source_episode: int, selected: np.ndarray, state: np.ndarray, action: np.ndarray, timestamp: np.ndarray, frame_index: np.ndarray, image_mask: np.ndarray) -> None:
+        episode, length = len(self.episodes), len(state)
+        mask = np.broadcast_to(self.active_mask, (length, EEF_DIM))
+        table = pa.table({
+            "observation.state": pa.array(state.tolist(), type=pa.list_(pa.float32(), EEF_DIM)),
+            "action": pa.array(action.tolist(), type=pa.list_(pa.float32(), EEF_DIM)),
+            "timestamp": pa.array(timestamp, type=pa.float32()), "frame_index": pa.array(frame_index, type=pa.int64()),
+            "episode_index": pa.array(np.full(length, episode, dtype=np.int64)),
+            "index": pa.array(np.arange(self.global_index, self.global_index + length, dtype=np.int64)),
+            "task_index": pa.array(np.zeros(length, dtype=np.int64)),
+            "policy.state_mask": pa.array(mask.tolist(), type=pa.list_(pa.bool_(), EEF_DIM)),
+            "policy.action_mask": pa.array(mask.tolist(), type=pa.list_(pa.bool_(), EEF_DIM)),
+            "policy.image_mask": pa.array(image_mask.tolist(), type=pa.list_(pa.bool_(), 3)),
+            "policy.domain": pa.array(np.full(length, 0 if source == "ego" else 1, dtype=np.int8)),
+            "policy.source_episode_index": pa.array(np.full(length, source_episode, dtype=np.int64)),
+            "policy.source_frame_index": pa.array(frame_index, type=pa.int64()),
+        }).replace_schema_metadata(None)
+        path = self.root / "data" / f"chunk-{episode // 1000:03d}" / f"file-{episode:03d}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, path, compression="zstd")
+        for key in VIDEO_KEYS:
+            link_or_copy(source_video(source_root, key, source_episode), self.root / "videos" / key / f"chunk-{episode // 1000:03d}" / f"file-{episode:03d}.mp4")
+        self.episodes.append({"episode_index": episode, "tasks": [0], "length": length})
+        self.provenance.append({"output_episode_index": episode, "source_domain": source, "source_episode_index": source_episode, "source_frame_range": [int(selected[0]), int(selected[-1])], "frames": length})
+        self.counts[source]["episodes"] += 1
+        self.counts[source]["frames"] += length
+        self.states.append(state); self.actions.append(action); self.global_index += length
+        for pattern, name in (((1, 1, 1), "head_left_right"), ((1, 0, 0), "head_only"), ((1, 1, 0), "head_left"), ((1, 0, 1), "head_right")):
+            self.image_counts[name] += int(np.all(image_mask == pattern, axis=1).sum())
+
+    def finish(self) -> dict[str, Any]:
+        if not self.episodes:
+            raise RuntimeError(f"no data written to {self.root}")
+        source_features = self.source_info["features"]
+        features = {
+            "observation.state": {"dtype": "float32", "shape": [EEF_DIM], "names": EEF_NAMES},
+            "action": {"dtype": "float32", "shape": [EEF_DIM], "names": EEF_NAMES},
+            **{key: source_features[key] for key in VIDEO_KEYS},
+            "timestamp": {"dtype": "float32", "shape": [1], "names": None}, "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+            "episode_index": {"dtype": "int64", "shape": [1], "names": None}, "index": {"dtype": "int64", "shape": [1], "names": None}, "task_index": {"dtype": "int64", "shape": [1], "names": None},
+            "policy.state_mask": {"dtype": "bool", "shape": [EEF_DIM], "names": EEF_NAMES}, "policy.action_mask": {"dtype": "bool", "shape": [EEF_DIM], "names": EEF_NAMES}, "policy.image_mask": {"dtype": "bool", "shape": [3], "names": IMAGE_MASK_NAMES},
+            "policy.domain": {"dtype": "int8", "shape": [1], "names": ["0=ego,1=real"]}, "policy.source_episode_index": {"dtype": "int64", "shape": [1], "names": None}, "policy.source_frame_index": {"dtype": "int64", "shape": [1], "names": None},
+        }
+        info = {"codebase_version": "v2.1", "robot_type": "arx5_2025_bimanual_eef", "fps": int(self.source_info["fps"]), "total_episodes": len(self.episodes), "total_frames": self.global_index, "total_tasks": 1, "total_videos": len(VIDEO_KEYS), "total_chunks": (len(self.episodes) + 999) // 1000, "chunks_size": 1000, "data_path": "data/chunk-{episode_chunk:03d}/file-{episode_index:03d}.parquet", "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-{episode_index:03d}.mp4", "splits": {self.split: f"0:{len(self.episodes)}"}, "features": features,
+            "arx_eef": {"state_action_layout": EEF_NAMES, "action_alignment": "next_source_frame_state", "active_sides": list(self.spec.active_sides), "default_state_mask": self.active_mask.tolist(), "default_action_mask": self.active_mask.tolist(), "image_mask_order": IMAGE_MASK_NAMES, "coordinate_frame": "per-arm zero-flange frame", "gripper": "0=open, 1=closed"}}
+        state, action = np.concatenate(self.states), np.concatenate(self.actions)
+        stat = lambda x: {"min": x.min(0).tolist(), "max": x.max(0).tolist(), "mean": x.mean(0).tolist(), "std": x.std(0).tolist(), "count": [len(x)]}
+        write_json(self.root / "meta" / "info.json", info)
+        write_json(self.root / "meta" / "stats.json", {"observation.state": stat(state), "action": stat(action)})
+        write_jsonl(self.root / "meta" / "tasks.jsonl", [{"task_index": 0, "task": self.spec.prompt}])
+        write_jsonl(self.root / "meta" / "episodes.jsonl", self.episodes)
+        write_jsonl(self.root / "meta" / "episodes_stats.jsonl", [])
+        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 2, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
+        return {"dataset": str(self.root), "episodes": len(self.episodes), "frames": self.global_index, "counts": self.counts}
+
+
+def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, camera_dropout: bool, probabilities: np.ndarray) -> list[dict[str, Any]]:
+    ego_info, real_info = read_json(spec.ego_root / "meta" / "info.json"), read_json(spec.real_root / "meta" / "info.json")
     if ego_info["fps"] != real_info["fps"]:
-        raise ValueError(f"FPS mismatch: ego={ego_info['fps']} real={real_info['fps']}")
-    for key in ("observation.state", "action"):
-        if ego_info["features"][key]["shape"] != [14] or real_info["features"][key]["shape"] != [14]:
-            raise ValueError(f"{key} must be 14-D in both source datasets")
-    for key in VIDEO_KEYS:
-        if ego_info["features"][key]["shape"] != real_info["features"][key]["shape"]:
-            raise ValueError(f"video shape mismatch for {key}")
-
-    dataset_mode = "camdrop" if camera_dropout else "nodropout"
-    target = output_root / f"{spec.name}_ego_real_fc085_xyz_{dataset_mode}_v1"
-    if target.exists():
-        if not overwrite:
-            raise FileExistsError(f"{target} exists; use --overwrite to replace it")
-        shutil.rmtree(target)
-
-    correction = read_json(spec.correction_path)
-    real_train_ids = {int(x) for x in correction["real_calibration_episode_ids"]}
-    real_eval_ids = {int(x) for x in correction["real_eval_episode_ids_not_used"]}
-    inactive = ~vector_mask(spec.active_sides)
-    action_mask = (~inactive).astype(bool)
-    rng = np.random.default_rng(seed + sum(ord(ch) for ch in spec.name))
-
-    output_index = 0
-    output_episode = 0
-    episode_rows: list[dict] = []
-    provenance: list[dict] = []
-    counts = {"ego": {"episodes": 0, "frames": 0}, "real_train": {"episodes": 0, "frames": 0}, "real_eval": {"episodes": 0, "frames": 0}}
-    state_sum = np.zeros(14, dtype=np.float64)
-    state_sumsq = np.zeros(14, dtype=np.float64)
-    action_sum = np.zeros(14, dtype=np.float64)
-    action_sumsq = np.zeros(14, dtype=np.float64)
-    state_min = np.full(14, np.inf)
-    state_max = np.full(14, -np.inf)
-    action_min = np.full(14, np.inf)
-    action_max = np.full(14, -np.inf)
-    image_mask_counts = {"head_left_right": 0, "head_only": 0, "head_left": 0, "head_right": 0}
-
-    for source, source_root in (("ego", spec.ego_root), ("real", spec.real_root)):
-        for parquet_path in episode_files(source_root):
-            table = pq.read_table(parquet_path)
-            source_ep = source_episode_index(table, parquet_path)
-            keep = valid_rows(table, source=source, active_sides=spec.active_sides)
-            source_state = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
-            source_ts = np.asarray(table["timestamp"].to_pylist(), dtype=np.float32)
-            source_frame = np.asarray(table["frame_index"].to_pylist(), dtype=np.int64)
-            selected = np.flatnonzero(keep)
-            if len(selected) == 0:
-                print(f"[skip] {spec.name} {source} episode {source_ep}: no valid transitions")
+        raise ValueError(f"FPS mismatch for {spec.name}")
+    for info in (ego_info, real_info):
+        for key in ("observation.state", "action"):
+            if info["features"][key]["shape"] != [JOINT_DIM]:
+                raise ValueError(f"{key} source must be {JOINT_DIM}D")
+        if any(key not in info["features"] for key in VIDEO_KEYS):
+            raise ValueError("source dataset must contain all three camera streams")
+    real_tables = [(path, pq.read_table(path)) for path in episode_files(spec.real_root)]
+    real_ids = {source_episode_index(table, path) for path, table in real_tables}
+    train_ids, _, split_source = resolve_real_split(spec, real_ids, args)
+    mode, active_mask = ("camdrop" if camera_dropout else "nodropout"), eef_mask(spec.active_sides)
+    base = output_root / "local"
+    writers = {split: DatasetWriter(base / f"arx_eef_{spec.name}_cotrain_{mode}_{split}", ego_info, spec, split, mode, active_mask, split_source, args.overwrite) for split in ("train", "eval")}
+    fk, rng = ArxForwardKinematics(args.scene, args.calibration), np.random.default_rng(args.seed + sum(map(ord, spec.name)))
+    sources = (("ego", spec.ego_root, [(path, pq.read_table(path)) for path in episode_files(spec.ego_root)]), ("real", spec.real_root, real_tables))
+    for source, root, tables in sources:
+        for path, table in tables:
+            source_ep = source_episode_index(table, path)
+            selected = np.flatnonzero(valid_rows(table, source, spec.active_sides))
+            if not len(selected):
                 continue
-
-            state = source_state[selected].copy()
-            action = source_state[selected + 1].copy()
-            # Inactive values are model-input placeholders and must never be supervised.
-            state[:, inactive] = 0.0
-            action[:, inactive] = 0.0
-            n = len(selected)
-            split = "train" if source == "ego" or source_ep in real_train_ids else "eval"
-            if source == "real" and source_ep not in real_train_ids | real_eval_ids:
-                raise ValueError(f"real episode {source_ep} is absent from correction split")
+            joints = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+            # Convert each original episode once so that state[t + 1] and
+            # action[t] share exactly the same quaternion hemisphere.
+            eef = apply_arm_mask(joints_to_eef(joints, fk), active_mask)
+            state, action = eef[selected], eef[selected + 1]
+            timestamp = np.asarray(table["timestamp"].to_pylist(), dtype=np.float32)[selected]
+            frames = np.asarray(table["frame_index"].to_pylist(), dtype=np.int64)[selected]
             if source == "ego":
-                image_mask = np.zeros((n, 3), dtype=bool)
-                image_mask[:, 0] = True
+                split, image_mask = "train", np.tile(np.asarray([1, 0, 0], dtype=bool), (len(selected), 1))
             else:
-                image_mask = choose_real_image_masks(
-                    n,
-                    camera_dropout=camera_dropout and split == "train",
-                    probabilities=camera_mask_probabilities,
-                    rng=rng,
-                )
-            for pattern, key in (([1, 1, 1], "head_left_right"), ([1, 0, 0], "head_only"), ([1, 1, 0], "head_left"), ([1, 0, 1], "head_right")):
-                image_mask_counts[key] += int(np.all(image_mask == pattern, axis=1).sum())
-
-            columns = {
-                "observation.state": pa.FixedSizeListArray.from_arrays(pa.array(state.reshape(-1), type=pa.float32()), 14),
-                "action": pa.FixedSizeListArray.from_arrays(pa.array(action.reshape(-1), type=pa.float32()), 14),
-                "timestamp": pa.array(source_ts[selected], type=pa.float32()),
-                "frame_index": pa.array(source_frame[selected], type=pa.int64()),
-                "episode_index": pa.array(np.full(n, output_episode, dtype=np.int64)),
-                "index": pa.array(np.arange(output_index, output_index + n, dtype=np.int64)),
-                "task_index": pa.array(np.zeros(n, dtype=np.int64)),
-                "policy.state_mask": pa.FixedSizeListArray.from_arrays(pa.array(np.tile(action_mask, n).reshape(-1), type=pa.bool_()), 14),
-                "policy.action_mask": pa.FixedSizeListArray.from_arrays(pa.array(np.tile(action_mask, n).reshape(-1), type=pa.bool_()), 14),
-                "policy.image_mask": pa.FixedSizeListArray.from_arrays(pa.array(image_mask.reshape(-1), type=pa.bool_()), 3),
-                "policy.domain": pa.array(np.full(n, 0 if source == "ego" else 1, dtype=np.int8)),
-                "policy.split": pa.array([split] * n, type=pa.string()),
-                "policy.source_episode_index": pa.array(np.full(n, source_ep, dtype=np.int64)),
-                "policy.source_frame_index": pa.array(source_frame[selected], type=pa.int64()),
-            }
-            output_path = target / "data" / "chunk-000" / f"file-{output_episode:03d}.parquet"
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            pq.write_table(pa.table(columns), output_path, compression="zstd")
-
-            for key in VIDEO_KEYS:
-                link_or_copy(source_video(source_root, key, source_ep), target / "videos" / key / "chunk-000" / f"file-{output_episode:03d}.mp4")
-            duration = float(source_ts[selected[-1]] + 1.0 / ego_info["fps"])
-            episode_rows.append({
-                "episode_index": output_episode,
-                "tasks": [spec.prompt],
-                "length": n,
-                "data/chunk_index": 0,
-                "data/file_index": output_episode,
-                "dataset_from_index": output_index,
-                "dataset_to_index": output_index + n,
-                **{f"videos/{key}/chunk_index": 0 for key in VIDEO_KEYS},
-                **{f"videos/{key}/file_index": output_episode for key in VIDEO_KEYS},
-                **{f"videos/{key}/from_timestamp": float(source_ts[selected[0]]) for key in VIDEO_KEYS},
-                **{f"videos/{key}/to_timestamp": duration for key in VIDEO_KEYS},
-            })
-            provenance.append({"output_episode_index": output_episode, "source_domain": source, "source_episode_index": source_ep, "split": split, "kept_source_frame_indices": [int(selected[0]), int(selected[-1])], "frames": n})
-            bucket = "ego" if source == "ego" else f"real_{split}"
-            counts[bucket]["episodes"] += 1
-            counts[bucket]["frames"] += n
-            for values, total, total_sq, lower, upper in ((state, state_sum, state_sumsq, state_min, state_max), (action, action_sum, action_sumsq, action_min, action_max)):
-                total += values.sum(axis=0)
-                total_sq += np.square(values).sum(axis=0)
-                np.minimum(lower, values.min(axis=0), out=lower)
-                np.maximum(upper, values.max(axis=0), out=upper)
-            output_index += n
-            output_episode += 1
-
-    if output_index == 0:
-        raise RuntimeError(f"{spec.name}: no transitions were written")
-    meta = target / "meta"
-    meta.mkdir(parents=True, exist_ok=True)
-    episodes_dir = meta / "episodes" / "chunk-000"
-    episodes_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(episode_rows), episodes_dir / "file-000.parquet", compression="zstd")
-    pq.write_table(pa.table({"task_index": pa.array([0], type=pa.int64()), "task": pa.array([spec.prompt])}), meta / "tasks.parquet")
-    features = {
-        "observation.state": {"dtype": "float32", "shape": [14], "names": JOINT_NAMES},
-        "action": {"dtype": "float32", "shape": [14], "names": JOINT_NAMES},
-        **{key: ego_info["features"][key] for key in VIDEO_KEYS},
-        "timestamp": {"dtype": "float32", "shape": [1], "names": None},
-        "frame_index": {"dtype": "int64", "shape": [1], "names": None},
-        "episode_index": {"dtype": "int64", "shape": [1], "names": None},
-        "index": {"dtype": "int64", "shape": [1], "names": None},
-        "task_index": {"dtype": "int64", "shape": [1], "names": None},
-        "policy.state_mask": {"dtype": "bool", "shape": [14], "names": JOINT_NAMES},
-        "policy.action_mask": {"dtype": "bool", "shape": [14], "names": JOINT_NAMES},
-        "policy.image_mask": {"dtype": "bool", "shape": [3], "names": IMAGE_MASK_NAMES},
-        "policy.domain": {"dtype": "int8", "shape": [1], "names": ["0=ego,1=real"]},
-        "policy.split": {"dtype": "string", "shape": [1], "names": None},
-        "policy.source_episode_index": {"dtype": "int64", "shape": [1], "names": None},
-        "policy.source_frame_index": {"dtype": "int64", "shape": [1], "names": None},
-    }
-    write_json(meta / "info.json", {"codebase_version": "v3.0", "robot_type": "arx_dual_arm_policy", "fps": ego_info["fps"], "total_episodes": output_episode, "total_frames": output_index, "features": features})
-    def summary(total, total_sq, lower, upper):
-        mean = total / output_index
-        return {"min": lower.tolist(), "max": upper.tolist(), "mean": mean.tolist(), "std": np.sqrt(np.maximum(total_sq / output_index - np.square(mean), 0.0)).tolist(), "count": [output_index] * 14}
-    write_json(meta / "stats.json", {"observation.state": summary(state_sum, state_sumsq, state_min, state_max), "action": summary(action_sum, action_sumsq, action_min, action_max)})
-    write_json(
-        target / "cotrain_provenance.json",
-        {
-            "schema": "tate.arx_cotrain_dataset",
-            "schema_version": 1,
-            "task": spec.name,
-            "ego_variant": str(spec.ego_root),
-            "real_dataset": str(spec.real_root),
-            "correction": str(spec.correction_path),
-            "fps": ego_info["fps"],
-            "state_action_layout": JOINT_NAMES,
-            "active_sides": list(spec.active_sides),
-            "action_alignment": "next_source_frame_state",
-            "final_frame_policy": "dropped",
-            "inactive_arm_policy": "zero_input_and_target_with_loss_mask",
-            "image_mask_order": IMAGE_MASK_NAMES,
-            "ego_image_mask": [True, False, False],
-            "real_camera_dropout": {
-                "enabled": camera_dropout,
-                "applied_to": "real train split only",
-                "probabilities": {
-                    "head_left_right": float(camera_mask_probabilities[0]),
-                    "head_only": float(camera_mask_probabilities[1]),
-                    "head_left": float(camera_mask_probabilities[2]),
-                    "head_right": float(camera_mask_probabilities[3]),
-                },
-            },
-            "image_mask_counts": image_mask_counts,
-            "counts": counts,
-            "episodes": provenance,
-        },
-    )
-    return {"dataset": str(target), "counts": counts, "episodes": output_episode, "frames": output_index}
+                split = "train" if source_ep in train_ids else "eval"
+                image_mask = choose_real_image_masks(len(selected), camera_dropout and split == "train", probabilities, rng)
+            writers[split].add(source=source, source_root=root, source_episode=source_ep, selected=selected, state=state, action=action, timestamp=timestamp, frame_index=frames, image_mask=image_mask)
+    return [writers["train"].finish(), writers["eval"].finish()]
 
 
 def main() -> None:
@@ -364,31 +335,28 @@ def main() -> None:
     parser.add_argument("--tasks", nargs="+", choices=sorted(TASKS), default=sorted(TASKS))
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument(
-        "--dataset-modes",
-        nargs="+",
-        choices=("no_dropout", "camera_dropout"),
-        default=("no_dropout", "camera_dropout"),
-        help="Materialize one or both camera-availability variants.",
-    )
-    parser.add_argument(
-        "--real-camera-mask-probs",
-        nargs=4,
-        type=float,
-        default=(0.50, 0.25, 0.125, 0.125),
-        metavar=("FULL", "HEAD", "HEAD_LEFT", "HEAD_RIGHT"),
-        help="Real-train camera-dropout probabilities; ignored by no_dropout.",
-    )
-    parser.add_argument("--seed", type=int, default=0, help="Deterministic camera-dropout seed.")
+    parser.add_argument("--dataset-modes", nargs="+", choices=("no_dropout", "camera_dropout"), default=("no_dropout", "camera_dropout"))
+    parser.add_argument("--real-camera-mask-probs", nargs=4, type=float, default=(0.50, 0.25, 0.125, 0.125), metavar=("FULL", "HEAD", "HEAD_LEFT", "HEAD_RIGHT"))
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--real-train-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--real-eval-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--real-train-ratio", type=float, default=None)
+    parser.add_argument("--split-seed", type=int, default=0)
+    parser.add_argument("--allow-correction-split-override", action="store_true")
+    parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
+    parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
     args = parser.parse_args()
+    if (args.real_train_ids is not None or args.real_eval_ids is not None) and args.real_train_ratio is not None:
+        parser.error("choose explicit episode IDs or --real-train-ratio, not both")
     probabilities = np.asarray(args.real_camera_mask_probs, dtype=np.float64)
-    if np.any(probabilities < 0) or not np.isclose(probabilities.sum(), 1.0):
-        parser.error("--real-camera-mask-probs must be non-negative and sum to 1")
-    results = []
+    if np.any(probabilities < 0) or not np.isclose(probabilities.sum(), 1):
+        parser.error("--real-camera-mask-probs must be non-negative and sum to one")
+    args.output_root, args.scene, args.calibration = args.output_root.resolve(), args.scene.resolve(), args.calibration.resolve()
+    result = []
     for mode in args.dataset_modes:
         for name in args.tasks:
-            results.append(materialize(TASKS[name], args.output_root, args.overwrite, camera_dropout=mode == "camera_dropout", camera_mask_probabilities=probabilities, seed=args.seed))
-    print(json.dumps(results, indent=2))
+            result.extend(materialize(TASKS[name], args.output_root, args, camera_dropout=mode == "camera_dropout", probabilities=probabilities))
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

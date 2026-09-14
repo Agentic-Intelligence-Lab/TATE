@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke test the ARX OpenPI data loader."""
+"""Smoke test the ARX EEF OpenPI data loader."""
 
 # The repository root is added to sys.path before importing project modules.
 # ruff: noqa: E402
@@ -18,13 +18,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from training.arx_joint_config import (
+from training.arx_eef_config import (
     DEFAULT_DATASET_ROOT,
     DEFAULT_REPO_ID,
     build_config,
     dataset_home_from_root,
 )
-from training.arx_joint_policy import ACTION_DIM
+from training.arx_eef_policy import ACTION_DIM
 
 
 def main() -> None:
@@ -64,7 +64,7 @@ def main() -> None:
         print(f"  {key}: {tuple(value.shape)} {value.dtype} first={value[0]}")
     print(f"state: {tuple(observation.state.shape)} {observation.state.dtype}")
     print(f"actions: {tuple(actions.shape)} {actions.dtype}")
-    print(f"ARX action dimensions: {ACTION_DIM}")
+    print(f"ARX EEF action dimensions: {ACTION_DIM}")
     print(f"state tail abs max: {float(np.abs(observation.state[..., ACTION_DIM:]).max()):.6g}")
     print(f"action tail abs max: {float(np.abs(actions[..., ACTION_DIM:]).max()):.6g}")
 

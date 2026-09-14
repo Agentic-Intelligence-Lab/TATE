@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute OpenPI normalization stats for an ARX joint dataset."""
+"""Compute OpenPI normalization stats for an ARX EEF dataset."""
 
 # The repository root is added to sys.path before importing project modules.
 # ruff: noqa: E402
@@ -21,13 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from training.arx_joint_config import (
+from training.arx_eef_config import (
     DEFAULT_DATASET_ROOT,
     DEFAULT_REPO_ID,
     build_config,
     dataset_home_from_root,
     train_steps_for_dataset,
 )
+from training.arx_eef_policy import ACTION_DIM
 from openpi.shared import normalize
 
 
@@ -60,7 +61,7 @@ def compute(args: argparse.Namespace) -> None:
         for line in episodes_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    for episode in tqdm.tqdm(episode_records, desc="Computing ARX norm stats"):
+    for episode in tqdm.tqdm(episode_records, desc="Computing ARX EEF norm stats"):
         episode_index = int(episode["episode_index"])
         parquet_path = (
             dataset_root
@@ -71,8 +72,8 @@ def compute(args: argparse.Namespace) -> None:
         table = pq.read_table(parquet_path)
         state = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
         action = np.asarray(table["action"].to_pylist(), dtype=np.float32)
-        if state.shape != action.shape or state.shape[-1] != 14:
-            raise ValueError(f"invalid ARX episode shapes in {parquet_path}: {state.shape}, {action.shape}")
+        if state.shape != action.shape or state.shape[-1] != ACTION_DIM:
+            raise ValueError(f"invalid ARX EEF episode shapes in {parquet_path}: {state.shape}, {action.shape}")
 
         action_windows = np.stack(
             [
@@ -95,7 +96,7 @@ def main() -> None:
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
     parser.add_argument("--assets-base-dir", default=None)
-    parser.add_argument("--exp-name", default="arx_joint_debug")
+    parser.add_argument("--exp-name", default="arx_eef_debug")
     parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
     parser.add_argument("--full-finetune", action="store_true")
     parser.add_argument("--batch-size", type=int, default=16)

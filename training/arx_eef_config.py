@@ -1,4 +1,4 @@
-"""OpenPI training configuration for ARX dual-arm joint datasets."""
+"""OpenPI training configuration for ARX dual-arm EEF datasets."""
 
 # OpenPI is vendored in this repository and is added to sys.path below.
 # ruff: noqa: E402
@@ -28,15 +28,15 @@ import openpi.training.optimizer as openpi_optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as transforms
 
-from training import arx_joint_policy
+from training import arx_eef_policy
 
 
 DEFAULT_TASK_PROMPT = "fold the paper boxes."
-DEFAULT_REPO_ID = "local/arx_stack_cube_ego"
+DEFAULT_REPO_ID = "local/arx_eef_stack_cube_ego"
 DEFAULT_DATASET_ROOT = REPO_ROOT / "outputs" / "lerobot" / DEFAULT_REPO_ID
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_TRAIN_EPOCHS = 2
-MODEL_ACTION_DIM = arx_joint_policy.MODEL_ACTION_DIM
+MODEL_ACTION_DIM = arx_eef_policy.MODEL_ACTION_DIM
 
 
 def train_steps_for_epochs(batch_size: int, *, total_frames: int, epochs: int = DEFAULT_TRAIN_EPOCHS) -> int:
@@ -73,8 +73,8 @@ def train_steps_for_dataset(
 
 
 @dataclasses.dataclass(frozen=True)
-class ArxJointDataConfig(openpi_config.DataConfigFactory):
-    """LeRobot DataConfig for three-camera ARX joint training."""
+class ArxEefDataConfig(openpi_config.DataConfigFactory):
+    """LeRobot DataConfig for three-camera ARX EEF training."""
 
     default_prompt: str | None = DEFAULT_TASK_PROMPT
     mask_wrist_images: bool | None = None
@@ -84,7 +84,7 @@ class ArxJointDataConfig(openpi_config.DataConfigFactory):
         mask_wrist_images = (
             self.mask_wrist_images
             if self.mask_wrist_images is not None
-            else self.repo_id.endswith("_ego")
+            else self.repo_id.endswith("_ego") or self.repo_id.endswith("_cotrain")
         )
         repack_transform = transforms.Group(
             inputs=[
@@ -104,16 +104,16 @@ class ArxJointDataConfig(openpi_config.DataConfigFactory):
         )
         data_transforms = transforms.Group(
             inputs=[
-                arx_joint_policy.ArxJointInputs(
+                arx_eef_policy.ArxEefInputs(
                     model_type=model_config.model_type,
                     mask_wrist_images=mask_wrist_images,
                 )
             ],
-            outputs=[arx_joint_policy.ArxJointOutputs()],
+            outputs=[arx_eef_policy.ArxEefOutputs()],
         )
         model_transforms = openpi_config.ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
         model_transforms = transforms.Group(
-            inputs=[arx_joint_policy.CastFloat32(), *model_transforms.inputs],
+            inputs=[arx_eef_policy.CastFloat32(), *model_transforms.inputs],
             outputs=model_transforms.outputs,
         )
         return dataclasses.replace(
@@ -128,7 +128,7 @@ class ArxJointDataConfig(openpi_config.DataConfigFactory):
 def build_config(
     *,
     repo_id: str = DEFAULT_REPO_ID,
-    exp_name: str = "arx_joint_debug",
+    exp_name: str = "arx_eef_debug",
     model: str = "pi05",
     low_mem: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -167,11 +167,11 @@ def build_config(
 
     freeze_filter = model_config.get_freeze_filter() if low_mem else nnx.Nothing
     return openpi_config.TrainConfig(
-        name="arx_joint",
+        name="arx_eef",
         project_name="lifego",
         exp_name=exp_name,
         model=model_config,
-        data=ArxJointDataConfig(
+        data=ArxEefDataConfig(
             repo_id=repo_id,
             base_config=openpi_config.DataConfig(prompt_from_task=True),
             mask_wrist_images=mask_wrist_images,

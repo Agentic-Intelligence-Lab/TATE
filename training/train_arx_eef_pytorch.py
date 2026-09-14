@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PyTorch training entry point for ARX dual-arm joint Pi0/Pi0.5 models."""
+"""PyTorch training entry point for ARX dual-arm EEF Pi0/Pi0.5 models."""
 
 # OpenPI and this repository are added to sys.path before project imports.
 # ruff: noqa: E402
@@ -18,14 +18,14 @@ for path in (REPO_ROOT, OPENPI_ROOT, OPENPI_ROOT / "src"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from training.arx_joint_config import (
+from training.arx_eef_config import (
     DEFAULT_DATASET_ROOT,
     DEFAULT_REPO_ID,
     build_config,
     dataset_home_from_root,
     train_steps_for_dataset,
 )
-from training.arx_joint_policy import ACTION_DIM
+from training.arx_eef_policy import ACTION_DIM
 
 
 DEFAULT_PI05_WEIGHT_PATH = "/mnt/workspace/sunxiaoquan/models/pi05_base"
@@ -38,7 +38,7 @@ def _patch_pytorch_action_loss_dim(loss_action_dim: int) -> None:
     from openpi.models_pytorch import pi0_pytorch
 
     original_forward = pi0_pytorch.PI0Pytorch.forward
-    if getattr(original_forward, "_arx_joint_loss_patched", False):
+    if getattr(original_forward, "_arx_eef_loss_patched", False):
         return
 
     def forward_with_cropped_loss(self, observation, actions, noise=None, time=None):
@@ -47,7 +47,7 @@ def _patch_pytorch_action_loss_dim(loss_action_dim: int) -> None:
             return losses
         return losses[..., :loss_action_dim]
 
-    forward_with_cropped_loss._arx_joint_loss_patched = True
+    forward_with_cropped_loss._arx_eef_loss_patched = True
     pi0_pytorch.PI0Pytorch.forward = forward_with_cropped_loss
 
 
@@ -57,7 +57,7 @@ def main() -> None:
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
     parser.add_argument("--assets-base-dir", default=None)
     parser.add_argument("--checkpoint-base-dir", default=None)
-    parser.add_argument("--exp-name", default="arx_joint_pi05_pytorch")
+    parser.add_argument("--exp-name", default="arx_eef_pi05_pytorch")
     parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
     parser.add_argument("--pytorch-weight-path", default=DEFAULT_PI05_WEIGHT_PATH)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -74,7 +74,7 @@ def main() -> None:
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
     if args.loss_action_dim > ACTION_DIM:
-        raise ValueError(f"--loss-action-dim cannot exceed ARX action dimension {ACTION_DIM}")
+        raise ValueError(f"--loss-action-dim cannot exceed ARX EEF action dimension {ACTION_DIM}")
     if args.loss_action_dim > 32:
         raise ValueError("--loss-action-dim cannot exceed the model action dimension 32")
 

@@ -1,4 +1,4 @@
-"""OpenPI transforms for ARX dual-arm joint actions."""
+"""OpenPI transforms for ARX dual-arm EEF actions."""
 
 from __future__ import annotations
 
@@ -11,22 +11,24 @@ from openpi import transforms
 from openpi.models import model as _model
 
 
-ACTION_DIM = 14
+ACTION_DIM = 16
 MODEL_ACTION_DIM = 32
-JOINT_NAMES = (
-    "left_joint_1",
-    "left_joint_2",
-    "left_joint_3",
-    "left_joint_4",
-    "left_joint_5",
-    "left_joint_6",
+EEF_NAMES = (
+    "left_eef_x",
+    "left_eef_y",
+    "left_eef_z",
+    "left_eef_qx",
+    "left_eef_qy",
+    "left_eef_qz",
+    "left_eef_qw",
     "left_gripper",
-    "right_joint_1",
-    "right_joint_2",
-    "right_joint_3",
-    "right_joint_4",
-    "right_joint_5",
-    "right_joint_6",
+    "right_eef_x",
+    "right_eef_y",
+    "right_eef_z",
+    "right_eef_qx",
+    "right_eef_qy",
+    "right_eef_qz",
+    "right_eef_qw",
     "right_gripper",
 )
 
@@ -45,15 +47,15 @@ def _parse_image(image) -> np.ndarray:
 def _validate_vector(value, name: str) -> np.ndarray:
     value = np.asarray(value, dtype=np.float32)
     if value.shape[-1] != ACTION_DIM:
-        raise ValueError(f"ARX {name} must be {ACTION_DIM}D, got {value.shape}")
+        raise ValueError(f"ARX EEF {name} must be {ACTION_DIM}D, got {value.shape}")
     if not np.all(np.isfinite(value)):
-        raise ValueError(f"ARX {name} contains non-finite values")
+        raise ValueError(f"ARX EEF {name} contains non-finite values")
     return value
 
 
 @dataclasses.dataclass(frozen=True)
-class ArxJointInputs(transforms.DataTransformFn):
-    """Map ARX LeRobot samples to OpenPI's three-camera observation format."""
+class ArxEefInputs(transforms.DataTransformFn):
+    """Map ARX EEF LeRobot samples to OpenPI's three-camera observation format."""
 
     model_type: _model.ModelType
     mask_wrist_images: bool = False
@@ -106,8 +108,8 @@ class ArxJointInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
-class ArxJointOutputs(transforms.DataTransformFn):
-    """Return only the ARX dimensions from a model action tensor."""
+class ArxEefOutputs(transforms.DataTransformFn):
+    """Return only the 16 ARX EEF dimensions from a model action tensor."""
 
     def __call__(self, data: dict) -> dict:
         actions = np.asarray(data["actions"], dtype=np.float32)

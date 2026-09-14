@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate an ARX joint checkpoint on samples from a converted dataset."""
+"""Evaluate an ARX EEF checkpoint on samples from a converted dataset."""
 
 # OpenPI and this repository are added to sys.path before project imports.
 # ruff: noqa: E402
@@ -23,8 +23,8 @@ for path in (REPO_ROOT, OPENPI_ROOT, OPENPI_ROOT / "src"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from training.arx_joint_config import DEFAULT_DATASET_ROOT, DEFAULT_REPO_ID, build_config, dataset_home_from_root
-from training.arx_joint_policy import ACTION_DIM, JOINT_NAMES
+from training.arx_eef_config import DEFAULT_DATASET_ROOT, DEFAULT_REPO_ID, build_config, dataset_home_from_root
+from training.arx_eef_policy import ACTION_DIM, EEF_NAMES
 
 
 def _resolve_checkpoint_dir(checkpoint_dir: Path, step: int | None) -> Path:
@@ -85,7 +85,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--dataset-root", default=str(DEFAULT_DATASET_ROOT))
-    parser.add_argument("--exp-name", default="arx_joint_pi05_pytorch")
+    parser.add_argument("--exp-name", default="arx_eef_pi05_pytorch")
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
@@ -173,7 +173,7 @@ def main() -> None:
     print(f"checkpoint: {checkpoint}")
     print(f"samples: {len(pred)}")
     print(f"overall_rmse: {float(np.sqrt(np.mean(np.square(pred - label)))):.6f}")
-    for name, value in zip(JOINT_NAMES, rmse, strict=True):
+    for name, value in zip(EEF_NAMES, rmse, strict=True):
         print(f"{name}: {float(value):.6f}")
 
     if args.output_npz:

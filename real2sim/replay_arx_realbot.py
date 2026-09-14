@@ -51,8 +51,13 @@ class JointTrajectory:
 
 
 def as_abs(path: str | Path) -> Path:
-    path = Path(path)
-    return path if path.is_absolute() else REPO_ROOT / path
+    path = Path(path).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    cwd_candidate = (Path.cwd() / path).resolve()
+    if cwd_candidate.exists():
+        return cwd_candidate
+    return (REPO_ROOT / path).resolve()
 
 
 def sim_width_to_sdk_gripper(width_m: np.ndarray) -> np.ndarray:
@@ -343,11 +348,23 @@ def protect_and_close(SingleArm, arms: dict[str, Any]) -> None:
             pass
 
 
+def close_arms(arms: dict[str, Any]) -> None:
+    for arm in arms.values():
+        try:
+            arm.close()
+        except Exception:
+            pass
+
+
 def send_frame(arms: dict[str, Any], frame: dict[str, tuple[np.ndarray, float]], duration: float) -> None:
     for side, arm in arms.items():
         q, gripper = frame[side]
-        arm.set_joint_positions(positions=q.tolist(), duration=float(duration))
-        arm.set_gripper_pos(float(gripper))
+        result = arm.set_joint_positions(positions=q.tolist(), duration=float(duration))
+        if result is False:
+            raise RuntimeError(f"SDK rejected {side} joint command")
+        result = arm.set_gripper_pos(float(gripper))
+        if result is False:
+            raise RuntimeError(f"SDK rejected {side} gripper command")
 
 
 def check_faults(arms: dict[str, Any]) -> None:
@@ -355,6 +372,77 @@ def check_faults(arms: dict[str, Any]) -> None:
         fault = getattr(arm, "fault", None)
         if fault:
             raise RuntimeError(f"{side} arm fault: {fault}")
+
+
+def feedback_errors(
+    arms: dict[str, Any], frame: dict[str, tuple[np.ndarray, float]]
+) -> dict[str, tuple[float, float]]:
+    errors = {}
+    for side, arm in arms.items():
+        measured = np.asarray(arm.get_joint_positions(), dtype=np.float64).reshape(-1)
+        if measured.size < 6 or not np.isfinite(measured[:6]).all():
+            raise RuntimeError(f"{side} returned invalid joint feedback: {measured}")
+        target_q, target_gripper = frame[side]
+        joint_error = float(np.max(np.abs(measured[:6] - target_q)))
+        gripper_error = (
+            0.0
+            if measured.size < 7
+            else abs(float(measured[6]) - float(target_gripper))
+        )
+        errors[side] = (joint_error, gripper_error)
+    return errors
+
+
+def update_tracking_feedback(
+    arms: dict[str, Any],
+    frame: dict[str, tuple[np.ndarray, float]],
+    args: argparse.Namespace,
+    consecutive: dict[str, int],
+    maxima: dict[str, tuple[float, float]],
+) -> None:
+    check_faults(arms)
+    for side, (joint_error, gripper_error) in feedback_errors(arms, frame).items():
+        previous = maxima.get(side, (0.0, 0.0))
+        maxima[side] = (
+            max(previous[0], joint_error),
+            max(previous[1], gripper_error),
+        )
+        outside = (
+            joint_error > args.max_tracking_joint_error_rad
+            or gripper_error > args.max_tracking_gripper_error
+        )
+        consecutive[side] = consecutive.get(side, 0) + 1 if outside else 0
+        if consecutive[side] >= args.max_tracking_error_frames:
+            raise RuntimeError(
+                f"{side} feedback exceeded tracking limits for "
+                f"{consecutive[side]} consecutive frames: "
+                f"joint_error={joint_error:.5f}rad "
+                f"gripper_error={gripper_error:.5f}"
+            )
+
+
+def wait_for_final_feedback(
+    arms: dict[str, Any],
+    frame: dict[str, tuple[np.ndarray, float]],
+    args: argparse.Namespace,
+) -> None:
+    deadline = time.monotonic() + args.final_feedback_timeout
+    last = feedback_errors(arms, frame)
+    while time.monotonic() < deadline:
+        check_faults(arms)
+        last = feedback_errors(arms, frame)
+        if all(
+            joint <= args.final_joint_tolerance_rad
+            and gripper <= args.final_gripper_tolerance
+            for joint, gripper in last.values()
+        ):
+            return
+        time.sleep(args.feedback_poll_period)
+    details = ", ".join(
+        f"{side}: joint={error[0]:.5f}rad gripper={error[1]:.5f}"
+        for side, error in last.items()
+    )
+    raise RuntimeError(f"final replay frame did not converge ({details})")
 
 
 def execute_trajectory(traj: JointTrajectory, command_frames: list[dict[str, tuple[np.ndarray, float]]], args: argparse.Namespace) -> None:
@@ -366,6 +454,7 @@ def execute_trajectory(traj: JointTrajectory, command_frames: list[dict[str, tup
 
     args.active_sides = tuple(side for side in SIDE_ORDER if side in traj.sides)
     SingleArm, arms = build_real_arms(args)
+    normal_completion = False
     try:
         first = command_frames[0]
         current = current_frame_from_arms(arms, first)
@@ -377,10 +466,13 @@ def execute_trajectory(traj: JointTrajectory, command_frames: list[dict[str, tup
         print(f"ramp_to_start duration={ramp_duration:.2f}s frames={len(ramp_frames)}")
 
         period = 1.0 / args.rate
+        consecutive = {side: 0 for side in arms}
+        maxima = {side: (0.0, 0.0) for side in arms}
         for frame in ramp_frames:
             send_frame(arms, frame, period)
             check_faults(arms)
             time.sleep(period)
+            update_tracking_feedback(arms, frame, args, consecutive, maxima)
 
         print(f"execute replay frames={len(command_frames)} rate={args.rate:.1f}Hz")
         for i, frame in enumerate(command_frames):
@@ -391,6 +483,29 @@ def execute_trajectory(traj: JointTrajectory, command_frames: list[dict[str, tup
                 print(f"sent {i + 1}/{len(command_frames)}")
             elapsed = time.monotonic() - t0
             time.sleep(max(0.0, period - elapsed))
+            update_tracking_feedback(arms, frame, args, consecutive, maxima)
+
+        final_frame = command_frames[-1]
+        wait_for_final_feedback(arms, final_frame, args)
+        for side in SIDE_ORDER:
+            if side in maxima:
+                print(
+                    f"{side} feedback_max: joint={maxima[side][0]:.5f}rad "
+                    f"gripper={maxima[side][1]:.5f}"
+                )
+        input(
+            "Final real-data frame reached; joint position control remains active. "
+            "Press Enter to return all arms home > "
+        )
+        for side in SIDE_ORDER:
+            if side not in arms:
+                continue
+            check_faults({side: arms[side]})
+            result = arms[side].go_home(float(args.home_duration), wait=True)
+            if result is False:
+                raise RuntimeError(f"SDK rejected {side} go_home")
+        normal_completion = True
+        print("home=PASS for all arms; closing without protect mode")
     except KeyboardInterrupt:
         print("\nKeyboardInterrupt: entering protect mode")
         raise
@@ -398,7 +513,11 @@ def execute_trajectory(traj: JointTrajectory, command_frames: list[dict[str, tup
         traceback.print_exc()
         raise
     finally:
-        protect_and_close(SingleArm, arms)
+        if normal_completion:
+            close_arms(arms)
+        else:
+            print("abnormal exit: entering protect mode before close")
+            protect_and_close(SingleArm, arms)
 
 
 def main() -> None:
@@ -414,6 +533,14 @@ def main() -> None:
     parser.add_argument("--max-gripper-speed", type=float, default=1.0, help="SDK gripper units/s safety limit")
     parser.add_argument("--ramp-time", type=float, default=3.0, help="Minimum seconds to move from current pose to first frame")
     parser.add_argument("--progress-every", type=int, default=100)
+    parser.add_argument("--max-tracking-joint-error-rad", type=float, default=0.25)
+    parser.add_argument("--max-tracking-gripper-error", type=float, default=0.75)
+    parser.add_argument("--max-tracking-error-frames", type=int, default=10)
+    parser.add_argument("--final-joint-tolerance-rad", type=float, default=0.08)
+    parser.add_argument("--final-gripper-tolerance", type=float, default=0.20)
+    parser.add_argument("--final-feedback-timeout", type=float, default=10.0)
+    parser.add_argument("--feedback-poll-period", type=float, default=0.05)
+    parser.add_argument("--home-duration", type=float, default=8.0)
     parser.add_argument("--execute", action="store_true", help="Send commands to the real robot")
     parser.add_argument("--yes-i-understand-risk", action="store_true", help="Required together with --execute")
     args = parser.parse_args()
@@ -422,6 +549,18 @@ def main() -> None:
         raise RuntimeError("--rate must be positive")
     if args.max_joint_speed <= 0.0 or args.max_gripper_speed <= 0.0:
         raise RuntimeError("speed limits must be positive")
+    if args.max_tracking_joint_error_rad <= 0.0 or args.max_tracking_gripper_error <= 0.0:
+        raise RuntimeError("tracking feedback limits must be positive")
+    if args.max_tracking_error_frames < 1:
+        raise RuntimeError("--max-tracking-error-frames must be at least 1")
+    if (
+        args.final_joint_tolerance_rad <= 0.0
+        or args.final_gripper_tolerance <= 0.0
+        or args.final_feedback_timeout <= 0.0
+        or args.feedback_poll_period <= 0.0
+        or args.home_duration <= 0.0
+    ):
+        raise RuntimeError("final feedback and home parameters must be positive")
 
     traj = load_trajectory(as_abs(args.data))
     validate_trajectory(traj)

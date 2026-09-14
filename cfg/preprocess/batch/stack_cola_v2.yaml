@@ -1,0 +1,82 @@
+# Finger-Center correction ablation: none / position / rotation / both.
+experiment_id: stack_cola_v2_50
+
+source:
+  ego_dataset: /home/xule/le_ws/Data_TATE/stack_cola_ego_v2
+  video_key: observation.images.head
+  real_dataset: /home/xule/le_ws/Data_TATE/stack_cola_arx
+  real_manifest: outputs/arx_real_flange/stack_cola_arx/manifest.json
+
+trajectory:
+  arm_mode: bimanual
+  active_sides: [left, right]
+  trim:
+    start_seconds: 0
+    end_seconds: 0
+
+outputs:
+  cache_root: outputs/cache/wilor
+  experiment_root: outputs/experiments
+
+wilor:
+  id: wilor_mini_d405_v1
+  preprocess_config: cfg/preprocess/base/Preprocess.yaml
+  pretrained_dir: /home/xule/le_ws/LifEgo/.cache/wilor_mini
+
+geometry:
+  camera_calibration: cfg/preprocess/base/RealSenseD405.yaml
+
+hand2gripper_variants:
+  finger_center_hys085:
+    mode: finger_center
+    grasp_mode: finger_center
+    eef_config: cfg/preprocess/base/EEFExport.yaml
+    grasp_close_ratio: 0.85
+    grasp_open_ratio: 0.90
+    grasp_min_frames: 10
+
+correction_variants:
+  none:
+    mode: none
+
+  position_rotation:
+    mode: pose_correction
+    artifact: outputs/corrections/stack_cola/xyz_mean_target_min_bending_all_anchors.json
+    rotation_artifact: outputs/corrections/stack_cola/global_rotation_finger_center.json
+    options: 
+      target_mode: mean
+      space: free_xyz
+      propagation: min_bending
+
+runs:
+  - id: finger_center_hys085__none
+    hand2gripper: finger_center_hys085
+    correction: none
+  - id: finger_center_hys085__position_rotation
+    hand2gripper: finger_center_hys085
+    correction: position_rotation
+
+retarget:
+  enabled: true
+  scene: assets/mujoco_arx_scene/scene.xml
+  options:
+    n_iter: 80
+    dt: 0.05
+    solver: daqp
+    damping: 0.01
+    lm_damping: 0.01
+    pos_weight: 5.0
+    ori_weight: 0.2
+    smooth_weight: 0.05
+    initial_q: [0.0, 1.2, 1.5, 0.0, 0.0, 0.0]
+    progress_every: 25
+
+lerobot:
+  enabled: true
+  task: "pick two cola cans and place them in the brown box"
+  video_mode: hardlink
+  replace_state_action: true
+  action_alignment: same_frame
+  gripper_open_raw: -3.4
+  gripper_closed_raw: 0.1
+  require_all_episodes: false

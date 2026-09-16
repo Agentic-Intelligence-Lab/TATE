@@ -44,7 +44,41 @@ An H2G is an entry in `hand2gripper_variants`. A run combines one H2G with one
 correction. Runs using the same H2G share the WiLoR and raw EEF artifacts. They
 also share one visualization instead of re-encoding it for every correction.
 
-## 2. Experiment YAML
+## 2. Generate the real-data calibration manifest
+
+Any experiment that uses a correction artifact needs a real-data reference
+manifest. Generate it once from the matching ARX LeRobot dataset before
+running correction fitting or batch preprocessing:
+
+```bash
+cd /home/xule/le_ws/TATE
+PY=/home/xule/miniconda3/envs/lifego/bin/python
+
+$PY -m real_data.arx_lerobot_adapter \
+  --input /home/xule/le_ws/Data_TATE/stack_cola_arx \
+  --out outputs/arx_real_flange/stack_cola_arx
+```
+
+This writes one FK-derived TCP/flange JSON per real episode and the manifest
+referenced by `source.real_manifest`:
+
+```text
+outputs/arx_real_flange/stack_cola_arx/manifest.json
+```
+
+Set `--input` to the same dataset as `source.real_dataset`, and set
+`source.real_manifest` to the resulting `manifest.json`. The adapter uses the
+default ARX MuJoCo scene and `cfg/preprocess/base/RealSenseD405.yaml`; pass
+`--scene` or `--calibration` when your rig uses different files. It never
+modifies the source LeRobot dataset. To intentionally regenerate an existing
+output directory, append `--overwrite`.
+
+After the manifest exists, define the held-out real split and fit the position
+and/or rotation correction artifacts referenced from `correction_variants`.
+See [../evaluation/README.md](../evaluation/README.md) for those commands and
+[../real_data/README.md](../real_data/README.md) for FK and gripper options.
+
+## 3. Experiment YAML
 
 The following example shows the complete structure:
 
@@ -160,7 +194,7 @@ If a configuration references correction artifacts, first convert the real
 data, define a held-out-safe real split, and fit the artifacts. See
 [../evaluation/README.md](../evaluation/README.md) for the evaluation protocol.
 
-## 3. Running an experiment
+## 4. Running an experiment
 
 ```bash
 cd /home/xule/le_ws/TATE
@@ -249,7 +283,7 @@ all relevant downstream stages in the same invocation.
 --visualization-ratio-plot-max 1.5
 ```
 
-## 4. Resume, force, and failure policy
+## 5. Resume, force, and failure policy
 
 Each manifest stage record contains a status, signature, timestamp,
 dependencies, and output paths. A stage is resume-skipped only if its status is
@@ -277,7 +311,7 @@ that have the required final EEF and IK outputs. Excluded source IDs are stored
 in `meta/tate_preprocess.json`. If a partial cohort was packaged first, use
 `--force-stage package` when replacing it with the full cohort.
 
-## 5. Fingerprints and immutable experiments
+## 6. Fingerprints and immutable experiments
 
 The shared WiLoR cache identity includes:
 
@@ -293,7 +327,7 @@ configuration, implementation files, and correction artifacts. One
 dependencies. Use a new ID after changing these semantics; existing experiments
 are never overwritten implicitly.
 
-## 6. Output layout
+## 7. Output layout
 
 ```text
 outputs/cache/wilor/<dataset>/<dataset-hash>/<wilor-id>/
@@ -329,7 +363,7 @@ outputs/experiments/<experiment-id>/
         └── tate_preprocess.json
 ```
 
-## 7. Derived LeRobot contract
+## 8. Derived LeRobot contract
 
 Derived datasets retain source episode, frame, and timestamp provenance and add:
 
@@ -347,7 +381,7 @@ With `replace_state_action: true`, retargeted ARX joint targets replace
 are recomputed for trimmed videos. `lerobot.task` is written consistently to
 frame data, episode metadata, and `tasks.parquet`.
 
-## 8. Custom correction interface
+## 9. Custom correction interface
 
 The built-in `none` and `pose_correction` modes cover the current experiments.
 A custom correction can be configured as:

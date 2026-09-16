@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TATE Stack Cube · ARX 控制台</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b1020;--card:#151d32;--line:#2a3655;--text:#edf2ff;--muted:#9eabc8;--blue:#4c8dff;--red:#e85d68;--green:#35c486;--amber:#dca154}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#080d19,#111a2c);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+    main{max-width:1050px;margin:32px auto;padding:0 18px}.title{display:flex;justify-content:space-between;gap:15px;align-items:center}.badge{border:1px solid var(--line);border-radius:999px;color:var(--muted);padding:6px 12px;white-space:nowrap}
+    .card{background:rgba(21,29,50,.96);border:1px solid var(--line);border-radius:16px;padding:20px;margin-top:18px;box-shadow:0 18px 55px #0005}h1{margin:0;font-size:28px}h2{margin:0 0 14px;font-size:18px}.muted{color:var(--muted)}
+    .state{font-size:19px;font-weight:700}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--amber);margin-right:9px}.ready .dot{background:var(--green)}.error .dot{background:var(--red)}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.controls{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:15px}.second{margin-top:12px}.start-row{margin-top:14px}.start-row label{display:flex;align-items:center;gap:9px;font-size:14px}.start-row input{width:auto}
+    label{display:block;color:var(--muted);font-size:13px;margin-bottom:6px}input,button{width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#0c1324;color:var(--text);font:inherit}button{cursor:pointer;font-weight:700}button:disabled{opacity:.42;cursor:not-allowed}.primary{background:var(--blue);border-color:var(--blue)}.confirm{background:var(--green);border-color:var(--green);color:#06180f}.danger{background:var(--red);border-color:var(--red)}
+    .cameras{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.camera{margin:0}.camera figcaption{color:var(--muted);font-size:13px;margin:0 0 7px}.camera img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#050812;border:1px solid var(--line);border-radius:11px}
+    .checkpoint-row{display:grid;grid-template-columns:minmax(0,1fr) 130px;gap:12px;align-items:end;margin-bottom:14px}.checkpoint-row input{font-family:ui-monospace,monospace;font-size:13px}.checkpoint-row button{height:46px}.tcp-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:15px}.tcp-help{margin:8px 0 0;font-size:13px}.tcp-help code{color:#ffcf70}
+    pre{height:330px;overflow:auto;white-space:pre-wrap;background:#070b14;border:1px solid var(--line);border-radius:12px;padding:14px;color:#cbd6ef;font:12px/1.45 ui-monospace,monospace}.notice{color:#ffcf70;margin-bottom:0}
+    @media(max-width:720px){.grid,.controls,.cameras,.checkpoint-row,.tcp-row{grid-template-columns:1fr}.title{align-items:start;flex-direction:column}}
+  </style>
+</head>
+<body><main>
+  <div class="title"><div><h1>TATE · Stack Cube</h1><div class="muted">ARX 右臂 EEF Pi0.5 控制台</div></div><div class="badge">SSH 本地访问 · 8089</div></div>
+  <section class="card"><h2>Checkpoint</h2>
+    <div class="checkpoint-row"><div><label for="checkpoint-path">ARX 主机上的 checkpoint 目录</label><input id="checkpoint-path" type="text" spellcheck="false" value="/home/qijun/models/TATE/openpi_checkpoints/arx_eef/stack_cube_cotrain_camdrop_pi05_bs16/2857"></div><button id="refresh-path" onclick="refreshSelectedPath()">检查此路径</button></div>
+    <div id="checkpoint-state" class="state"><span class="dot"></span><span>检查中…</span></div><div id="checkpoint-detail" class="muted"></div>
+  </section>
+  <section class="card"><h2>运行</h2>
+    <div class="grid"><div><label>动作下发上限（Hz）</label><input id="fps" type="number" min="1" max="10" step="1" value="5"></div><div><label>每次推理执行步数（1–10）</label><input id="steps" type="number" min="1" max="10" step="1" value="1"></div><div><label>当前状态</label><div id="run-state" class="state">空闲</div></div></div>
+    <div class="tcp-row"><div><label for="tcp-x">TCP offset X（m）</label><input id="tcp-x" type="number" step="0.0001" value="0.15"></div><div><label for="tcp-y">TCP offset Y（m）</label><input id="tcp-y" type="number" step="0.0001" value="0"></div><div><label for="tcp-z">TCP offset Z（m）</label><input id="tcp-z" type="number" step="0.0001" value="0"></div></div>
+    <p class="muted tcp-help">Flange → TCP。新数据/新 checkpoint 使用 <code>[0.15, 0, 0]</code>；旧 checkpoint 使用 <code>[0.105, 0.0018, -0.0063]</code>。该值同时用于真机观测和 action 的 IK 解码。</p>
+    <div class="start-row"><label><input id="start-pose" type="checkbox" checked>先移动右臂到真实 stack-cube 数据 episode 0 的第 60 帧（约 15 秒缓慢移动）</label></div>
+    <div class="controls"><button id="check" onclick="startTask('check')">检查模型加载</button><button id="smoke" onclick="startTask('smoke')">假数据推理</button><button id="prepare" class="primary" onclick="startTask('execute')">准备真机测试</button><button id="move" class="confirm" onclick="confirmMove()">确认 MOVE</button><button id="confirm" class="confirm" onclick="confirmRun()">确认 RUN</button></div>
+    <div class="controls second"><button id="pause" onclick="postAction('pause')">暂停 / 继续</button><button id="stop" class="danger" onclick="postAction('stop')">结束测试</button><button id="reset" onclick="postAction('reset')">复位</button></div>
+    <p class="notice">勾选起点后，“准备真机测试”会先检查并显示第 60 帧关节目标；检查现场无障碍后点击“确认 MOVE”，右臂缓慢到位，再读取三路相机与右臂状态、推理首个目标。点击“确认 RUN”后会重新观测并推理，下发的动作可能与预览不同。策略动作不再限制单步位移、旋转、关节或夹爪变化；仍检查目标范围、关节硬限位与 IK/FK 有效性。可随时点击“结束测试”。</p>
+  </section>
+  <section class="card"><h2>策略摄像头输入</h2><div class="cameras">
+    <figure class="camera"><figcaption>HEAD · 409122273248</figcaption><img src="/camera/head" alt="头部相机"></figure>
+    <figure class="camera"><figcaption>LEFT · 260322272716</figcaption><img src="/camera/left" alt="左腕相机"></figure>
+    <figure class="camera"><figcaption>RIGHT · 409122274457</figcaption><img src="/camera/right" alt="右腕相机"></figure>
+  </div><p class="muted">空闲时显示采集服务画面；策略运行时显示推理进程读取的画面。</p></section>
+  <section class="card"><h2>运行日志</h2><pre id="logs">等待任务…</pre></section>
+</main>
+<script>
+  const token='__TOKEN__';
+  const headers={'Content-Type':'application/json','X-Control-Token':token};
+  const pathInput=document.getElementById('checkpoint-path');
+  try{const saved=localStorage.getItem('tate-checkpoint-path');if(saved)pathInput.value=saved}catch(e){}
+  pathInput.addEventListener('keydown',e=>{if(e.key==='Enter')refreshSelectedPath()});
+  let checkpointReady=false,policyReady=false,running=false,mode='idle';
+  const modeLabels={idle:'空闲',checking:'检查模型',smoking:'假数据推理',preparing:'准备真机',awaiting_start_pose:'等待 MOVE',moving_start_pose:'移动到起点',awaiting_confirmation:'等待 RUN',testing:'真机运行',paused:'已暂停',stopping:'正在结束',resetting:'复位中'};
+  function chosenPath(){return pathInput.value.trim()}
+  async function api(path,options={}){const r=await fetch(path,options);const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||'请求失败');return j}
+  function updateButtons(){const available=checkpointReady&&policyReady&&!running;for(const id of ['check','smoke','prepare'])document.getElementById(id).disabled=!available;document.getElementById('move').disabled=mode!=='awaiting_start_pose';document.getElementById('confirm').disabled=mode!=='awaiting_confirmation';document.getElementById('pause').disabled=!['testing','paused'].includes(mode);document.getElementById('stop').disabled=!running;document.getElementById('reset').disabled=running;pathInput.disabled=running;document.getElementById('refresh-path').disabled=running;document.getElementById('start-pose').disabled=running;for(const id of ['tcp-x','tcp-y','tcp-z'])document.getElementById(id).disabled=running}
+  async function refreshCheckpoint(){
+    const path=chosenPath(),box=document.getElementById('checkpoint-state'),detail=document.getElementById('checkpoint-detail');
+    try{
+      const x=await api('/api/checkpoint?checkpoint_path='+encodeURIComponent(path));if(path!==chosenPath())return;
+      checkpointReady=x.ready;policyReady=x.policy_python_present;box.className='state '+(x.ready&&policyReady?'ready':'error');
+      box.querySelector('span:last-child').textContent=x.ready&&policyReady?'模型与环境已就绪':x.ready?'模型齐全，推理环境待安装':'Checkpoint 未就绪';
+      const parts=['模型 '+(x.model_present?`${(x.model_bytes/1e9).toFixed(2)} GB · ${x.model_complete?'文件完整':'文件不完整'}`:'未找到 model.safetensors'),'归一化 '+(x.norm_stats_present?'已就绪':'缺失'),'tokenizer '+(x.tokenizer_present?'已就绪':'缺失')];
+      if(x.partial_bytes)parts.push(`部分传输文件 ${(x.partial_bytes/1e9).toFixed(2)} GB`);detail.textContent=parts.join(' · ');
+    }catch(e){if(path!==chosenPath())return;checkpointReady=false;box.className='state error';box.querySelector('span:last-child').textContent='路径不可用';detail.textContent=e.message}
+    updateButtons();
+  }
+  async function refreshStatus(){
+    const path=chosenPath();
+    try{
+      const x=await api('/api/status?checkpoint_path='+encodeURIComponent(path));if(path!==chosenPath())return;
+      running=x.running;mode=x.mode;document.getElementById('run-state').textContent=(modeLabels[mode]||mode)+' · '+x.result;
+      const logs=document.getElementById('logs'),bottom=logs.scrollHeight-logs.scrollTop-logs.clientHeight<50;logs.textContent=x.logs.join('\n')||'等待任务…';if(bottom)logs.scrollTop=logs.scrollHeight;updateButtons();
+    }catch(e){}
+  }
+  function refreshSelectedPath(){try{localStorage.setItem('tate-checkpoint-path',chosenPath())}catch(e){}checkpointReady=false;updateButtons();refreshCheckpoint();refreshStatus()}
+  async function startTask(kind){
+    try{const fps=Number(document.getElementById('fps').value),steps=Number(document.getElementById('steps').value),tcp_offset_m=['tcp-x','tcp-y','tcp-z'].map(id=>Number(document.getElementById(id).value));if(!Number.isFinite(fps)||fps<1||fps>10||!Number.isInteger(steps)||steps<1||steps>10)throw new Error('频率需为 1–10 Hz，执行步数需为 1–10');if(tcp_offset_m.some(x=>!Number.isFinite(x))||Math.hypot(...tcp_offset_m)>.30)throw new Error('TCP offset 必须是有限的三个数，且模长不超过 0.30 m');await api('/api/start',{method:'POST',headers,body:JSON.stringify({mode:kind,checkpoint_path:chosenPath(),fps,n_action_steps:steps,start_pose:document.getElementById('start-pose').checked,tcp_offset_m})});running=true;updateButtons();refreshStatus()}catch(e){alert(e.message)}
+  }
+  async function confirmMove(){try{await api('/api/confirm-start-pose',{method:'POST',headers});refreshStatus()}catch(e){alert(e.message)}}
+  async function confirmRun(){try{await api('/api/confirm',{method:'POST',headers});refreshStatus()}catch(e){alert(e.message)}}
+  async function postAction(action){try{await api('/api/'+action,{method:'POST',headers});refreshStatus()}catch(e){alert(e.message)}}
+  async function pollCheckpoint(){await refreshCheckpoint();setTimeout(pollCheckpoint,3000)}
+  async function pollStatus(){await refreshStatus();setTimeout(pollStatus,700)}
+  pollCheckpoint();pollStatus();
+</script></body></html>

@@ -1,0 +1,8 @@
+{
+  "source": "Data_TATE/stack_cube_arx/data/chunk-000/file-000.parquet",
+  "episode_index": 0,
+  "frame_index": 60,
+  "side": "right",
+  "joint_position_rad": [-0.04406042397022247, 1.1640726327896118, 0.8299000263214111, -0.04901960864663124, -0.008964675478637218, 0.01888304017484188],
+  "gripper_raw": -0.07650620490312576
+}

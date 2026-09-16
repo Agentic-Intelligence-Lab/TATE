@@ -31,8 +31,11 @@ DEFAULT_WORKSPACE_HALF_SIZE_M = DEFAULT_ASSETS.platform.workspace_half_size_m
 DEFAULT_HEAD_CAMERA = DEFAULT_ASSETS.camera()
 
 GRIPPER_JOINTS = {"left_joint7", "left_joint8", "right_joint17", "right_joint18"}
-LEFT_TCP_OFFSET_M = DEFAULT_ASSETS.platform.left_tcp.t_flange_m
-RIGHT_TCP_OFFSET_M = DEFAULT_ASSETS.platform.right_tcp.t_flange_m
+# Authoritative ARX flange-to-TCP translation.  Keep this aligned with the
+# checked-in/generated scene and with hardware EEF conversions; do not inherit
+# a TCP value from an unrelated external assets registry when regenerating.
+LEFT_TCP_OFFSET_M = (0.15, 0.0, 0.0)
+RIGHT_TCP_OFFSET_M = (0.15, 0.0, 0.0)
 
 LINK_COLORS = {
     "base_link": "0.18 0.18 0.20 1",

@@ -15,7 +15,7 @@ import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,8 +65,11 @@ class TaskSpec:
 
 
 TASKS = {
-    "stack_cube": TaskSpec("stack_cube", "stack_cube_h2g_ablation_v4", "finger_center_hys085__xyz_mean_target_min_bending", "pick the cube and stack it on the blue plate", ("right",)),
-    "stack_cola": TaskSpec("stack_cola", "stack_cola_h2g_ablation_v4", "finger_center_hys085__xyz_mean_target_min_bending", "pick two colas and stack them on the brown box", ("left", "right")),
+    # Keep this synchronized with cfg/preprocess/batch/stack_cube_correction_ablation.yaml.
+    "stack_cube": TaskSpec("stack_cube", "stack_cube_correction_ablation_v1", "finger_center_hys085__position_rotation", "pick the cube and stack it on the blue plate", ("right",)),
+    # Keep this synchronized with cfg/preprocess/batch/stack_cola_v2.yaml,
+    # whose experiment_id is stack_cola_v2_50 and corrected default is pos+rot.
+    "stack_cola": TaskSpec("stack_cola", "stack_cola_v2_50", "finger_center_hys085__position_rotation", "pick two colas and stack them on the brown box", ("left", "right")),
 }
 
 
@@ -290,24 +293,72 @@ class DatasetWriter:
         return {"dataset": str(self.root), "episodes": len(self.episodes), "frames": self.global_index, "counts": self.counts}
 
 
+def output_dataset_root(base: Path, spec: TaskSpec, mode: str, split: str, label: str | None) -> Path:
+    if label is None:
+        name = f"arx_eef_{spec.name}_cotrain_{mode}_{split}"
+    else:
+        name = f"arx_eef_{spec.name}_{label}_{mode}_{split}"
+    return base / name
+
+
 def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, camera_dropout: bool, probabilities: np.ndarray) -> list[dict[str, Any]]:
-    ego_info, real_info = read_json(spec.ego_root / "meta" / "info.json"), read_json(spec.real_root / "meta" / "info.json")
-    if ego_info["fps"] != real_info["fps"]:
-        raise ValueError(f"FPS mismatch for {spec.name}")
-    for info in (ego_info, real_info):
+    roots = {"ego": spec.ego_root, "real": spec.real_root}
+    infos = {source: read_json(roots[source] / "meta" / "info.json") for source in args.sources}
+    fps_values = {int(info["fps"]) for info in infos.values()}
+    if len(fps_values) != 1:
+        raise ValueError(f"FPS mismatch between selected sources for {spec.name}")
+    for info in infos.values():
         for key in ("observation.state", "action"):
             if info["features"][key]["shape"] != [JOINT_DIM]:
                 raise ValueError(f"{key} source must be {JOINT_DIM}D")
         if any(key not in info["features"] for key in VIDEO_KEYS):
             raise ValueError("source dataset must contain all three camera streams")
-    real_tables = [(path, pq.read_table(path)) for path in episode_files(spec.real_root)]
-    real_ids = {source_episode_index(table, path) for path, table in real_tables}
-    train_ids, _, split_source = resolve_real_split(spec, real_ids, args)
+
+    real_tables: list[tuple[Path, pa.Table]] = []
+    real_ids: set[int] = set()
+    if "real" in args.sources:
+        real_tables = [(path, pq.read_table(path)) for path in episode_files(spec.real_root)]
+        all_real_ids = {source_episode_index(table, path) for path, table in real_tables}
+        if args.real_ids is not None:
+            requested = set(args.real_ids)
+            unknown = requested.difference(all_real_ids)
+            if unknown:
+                raise ValueError(f"unknown --real-ids for {spec.name}: {sorted(unknown)}")
+            real_tables = [(path, table) for path, table in real_tables if source_episode_index(table, path) in requested]
+        real_ids = {source_episode_index(table, path) for path, table in real_tables}
+        if not real_ids:
+            raise ValueError(f"no real episodes selected for {spec.name}")
+
+    if args.single_train_split:
+        train_ids, split_source = real_ids, "all selected sources placed in train"
+        splits = ("train",)
+    else:
+        if "real" not in args.sources:
+            raise ValueError("--sources ego requires --single-train-split; otherwise eval would be empty")
+        train_ids, _, split_source = resolve_real_split(spec, real_ids, args)
+        splits = ("train", "eval")
     mode, active_mask = ("camdrop" if camera_dropout else "nodropout"), eef_mask(spec.active_sides)
     base = output_root / "local"
-    writers = {split: DatasetWriter(base / f"arx_eef_{spec.name}_cotrain_{mode}_{split}", ego_info, spec, split, mode, active_mask, split_source, args.overwrite) for split in ("train", "eval")}
+    source_info = next(iter(infos.values()))
+    writers = {
+        split: DatasetWriter(
+            output_dataset_root(base, spec, mode, split, args.dataset_label),
+            source_info,
+            spec,
+            split,
+            mode,
+            active_mask,
+            split_source,
+            args.overwrite,
+        )
+        for split in splits
+    }
     fk, rng = ArxForwardKinematics(args.scene, args.calibration), np.random.default_rng(args.seed + sum(map(ord, spec.name)))
-    sources = (("ego", spec.ego_root, [(path, pq.read_table(path)) for path in episode_files(spec.ego_root)]), ("real", spec.real_root, real_tables))
+    sources = []
+    if "ego" in args.sources:
+        sources.append(("ego", spec.ego_root, [(path, pq.read_table(path)) for path in episode_files(spec.ego_root)]))
+    if "real" in args.sources:
+        sources.append(("real", spec.real_root, real_tables))
     for source, root, tables in sources:
         for path, table in tables:
             source_ep = source_episode_index(table, path)
@@ -327,12 +378,18 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
                 split = "train" if source_ep in train_ids else "eval"
                 image_mask = choose_real_image_masks(len(selected), camera_dropout and split == "train", probabilities, rng)
             writers[split].add(source=source, source_root=root, source_episode=source_ep, selected=selected, state=state, action=action, timestamp=timestamp, frame_index=frames, image_mask=image_mask)
-    return [writers["train"].finish(), writers["eval"].finish()]
+    return [writers[split].finish() for split in splits]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", nargs="+", choices=sorted(TASKS), default=sorted(TASKS))
+    parser.add_argument("--ego-experiment", default=None, help="Override the ego experiment directory for every selected task.")
+    parser.add_argument("--ego-variant", default=None, help="Override the ego dataset variant directory for every selected task.")
+    parser.add_argument("--sources", nargs="+", choices=("ego", "real"), default=("ego", "real"), help="Sources to include (default: ego real).")
+    parser.add_argument("--real-ids", nargs="*", type=int, default=None, help="Optional real episode IDs to include; useful with --single-train-split.")
+    parser.add_argument("--single-train-split", action="store_true", help="Write only a train repository and place every selected episode in it.")
+    parser.add_argument("--dataset-label", default=None, help="Name inserted after task, e.g. real_all; avoids overwriting the default cotrain names.")
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dataset-modes", nargs="+", choices=("no_dropout", "camera_dropout"), default=("no_dropout", "camera_dropout"))
@@ -346,6 +403,10 @@ def main() -> None:
     parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
     args = parser.parse_args()
+    if len(set(args.sources)) != len(args.sources):
+        parser.error("--sources cannot contain duplicates")
+    if args.dataset_label is not None and (not args.dataset_label or "/" in args.dataset_label):
+        parser.error("--dataset-label must be a non-empty name without '/'")
     if (args.real_train_ids is not None or args.real_eval_ids is not None) and args.real_train_ratio is not None:
         parser.error("choose explicit episode IDs or --real-train-ratio, not both")
     probabilities = np.asarray(args.real_camera_mask_probs, dtype=np.float64)
@@ -355,7 +416,14 @@ def main() -> None:
     result = []
     for mode in args.dataset_modes:
         for name in args.tasks:
-            result.extend(materialize(TASKS[name], args.output_root, args, camera_dropout=mode == "camera_dropout", probabilities=probabilities))
+            spec = TASKS[name]
+            if args.ego_experiment is not None or args.ego_variant is not None:
+                spec = replace(
+                    spec,
+                    experiment=args.ego_experiment or spec.experiment,
+                    variant=args.ego_variant or spec.variant,
+                )
+            result.extend(materialize(spec, args.output_root, args, camera_dropout=mode == "camera_dropout", probabilities=probabilities))
     print(json.dumps(result, indent=2))
 
 

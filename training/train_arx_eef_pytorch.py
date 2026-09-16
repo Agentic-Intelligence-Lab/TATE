@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,27 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OPENPI_ROOT = REPO_ROOT / "thirdparty" / "openpi"
+
+
+def _resolve_openpi_root() -> Path:
+    """Find OpenPI when training code and its virtualenv live in different trees."""
+    candidates = []
+    configured = os.environ.get("TATE_OPENPI_ROOT")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend((REPO_ROOT / "thirdparty" / "openpi", Path.cwd()))
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if (candidate / "scripts" / "train_pytorch.py").is_file() and (candidate / "src" / "openpi").is_dir():
+            return candidate
+    looked = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "Could not find an OpenPI checkout containing scripts/train_pytorch.py. "
+        f"Looked in: {looked}. Set TATE_OPENPI_ROOT explicitly."
+    )
+
+
+OPENPI_ROOT = _resolve_openpi_root()
 for path in (REPO_ROOT, OPENPI_ROOT, OPENPI_ROOT / "src"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -22,6 +43,7 @@ for path in (REPO_ROOT, OPENPI_ROOT, OPENPI_ROOT / "src"):
 from training.arx_eef_config import (
     DEFAULT_DATASET_ROOT,
     DEFAULT_REPO_ID,
+    DEFAULT_TRAIN_EPOCHS,
     build_config,
     dataset_home_from_root,
     train_steps_for_dataset,
@@ -74,6 +96,23 @@ def _patch_pytorch_action_loss(loss_action_dim: int, action_mask: list[bool]) ->
     pi0_pytorch.PI0Pytorch.forward = forward_with_masked_loss
 
 
+def _load_openpi_pytorch_trainer():
+    """Load OpenPI's training loop by absolute path.
+
+    ``scripts`` is a generic top-level module name.  Loading it this way avoids
+    collisions with a repository-local namespace package when TATE and OpenPI
+    are intentionally checked out in different directories.
+    """
+    module_path = OPENPI_ROOT / "scripts" / "train_pytorch.py"
+    spec = importlib.util.spec_from_file_location("_tate_openpi_train_pytorch", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load OpenPI PyTorch trainer from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
@@ -85,7 +124,21 @@ def main() -> None:
     parser.add_argument("--pytorch-weight-path", default=DEFAULT_PI05_WEIGHT_PATH)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--num-train-steps", type=int, default=None)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=DEFAULT_TRAIN_EPOCHS,
+        help=(
+            "Dataset passes used to derive --num-train-steps when that option is omitted "
+            f"(default: {DEFAULT_TRAIN_EPOCHS})."
+        ),
+    )
+    parser.add_argument(
+        "--num-train-steps",
+        type=int,
+        default=None,
+        help="Explicit optimizer-step count; overrides --epochs.",
+    )
     parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--wandb", action="store_true")
@@ -104,6 +157,10 @@ def main() -> None:
 
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
+    if args.epochs <= 0:
+        raise ValueError("--epochs must be positive")
+    if args.num_train_steps is not None and args.num_train_steps <= 0:
+        raise ValueError("--num-train-steps must be positive")
     if args.loss_action_dim > ACTION_DIM:
         raise ValueError(f"--loss-action-dim cannot exceed ARX EEF action dimension {ACTION_DIM}")
     if args.loss_action_dim > 32:
@@ -116,7 +173,11 @@ def main() -> None:
         raise FileNotFoundError(f"missing model.safetensors under {weight_path}")
     num_train_steps = args.num_train_steps
     if num_train_steps is None:
-        num_train_steps = train_steps_for_dataset(args.dataset_root, args.batch_size)
+        num_train_steps = train_steps_for_dataset(
+            args.dataset_root,
+            args.batch_size,
+            epochs=args.epochs,
+        )
 
     os.environ["HF_LEROBOT_HOME"] = str(dataset_home_from_root(args.dataset_root, args.repo_id))
     config = build_config(
@@ -137,7 +198,7 @@ def main() -> None:
         resume=args.resume,
     )
 
-    from scripts import train_pytorch as openpi_train_pytorch
+    openpi_train_pytorch = _load_openpi_pytorch_trainer()
 
     openpi_train_pytorch.init_logging()
     action_mask = [bool(value) for value in args.action_mask] if args.action_mask is not None else dataset_action_mask(args.dataset_root)

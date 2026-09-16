@@ -1,0 +1,15 @@
+[Unit]
+Description=TATE stack-cube ARX EEF control console
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/qijun/models/TATE/app
+Environment=TATE_APP_ROOT=/home/qijun/models/TATE/app
+ExecStart=/home/qijun/models/TATE/app/deployment/run_ui.sh
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

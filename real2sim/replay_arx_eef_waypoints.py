@@ -52,7 +52,7 @@ FRAME_NAMES = {"left": "left_flange_zero", "right": "right_flange_zero"}
 # This must match the TCP site used to generate/correct the current EEF
 # artifacts. It decodes the artifact; it is not the latest physical fingertip
 # measurement.
-DEFAULT_TCP_OFFSET_M = (0.105, 0.0018, -0.0063)
+DEFAULT_TCP_OFFSET_M = (0.15, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -1100,7 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=("X", "Y", "Z"),
         help=(
             "flange-to-TCP translation used by the input EEF artifact, in the "
-            "moving flange frame (default: 0.105 0.0018 -0.0063)"
+            "moving flange frame (default: 0.15 0 0)"
         ),
     )
     parser.add_argument("--seed-q", type=float, nargs=6, default=[0.0, 1.2, 1.5, 0.0, 0.0, 0.0])

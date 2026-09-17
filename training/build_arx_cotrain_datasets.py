@@ -27,7 +27,10 @@ from scipy.spatial.transform import Rotation
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-from real_data.arx_lerobot_adapter import ArxForwardKinematics
+from real_data.arx_lerobot_adapter import (
+    ArxForwardKinematics,
+    DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW,
+)
 
 
 OUTPUT_ROOT = REPO_ROOT / "outputs" / "lerobot"
@@ -163,8 +166,9 @@ def joints_to_eef(joints: np.ndarray, fk: ArxForwardKinematics) -> np.ndarray:
         for side, gripper_index in (("left", 6), ("right", 13)):
             pose = poses[side]["tcp"]
             quat = Rotation.from_matrix(pose[:3, :3]).as_quat()
-            # Recording convention: -3.4=open, 0.1=closed.
-            gripper = float(np.clip((row[gripper_index] + 3.4) / 3.5, 0, 1))
+            # Keep the real and ego labels in the same binary convention as
+            # the diagnostic adapter: raw >= -2.6 means closed (1).
+            gripper = float(row[gripper_index] >= DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW)
             values.extend([*pose[:3, 3], *quat, gripper])
         result[index] = values
     for offset in (3, 11):
@@ -281,7 +285,7 @@ class DatasetWriter:
             "policy.domain": {"dtype": "int8", "shape": [1], "names": ["0=ego,1=real"]}, "policy.source_episode_index": {"dtype": "int64", "shape": [1], "names": None}, "policy.source_frame_index": {"dtype": "int64", "shape": [1], "names": None},
         }
         info = {"codebase_version": "v2.1", "robot_type": "arx5_2025_bimanual_eef", "fps": int(self.source_info["fps"]), "total_episodes": len(self.episodes), "total_frames": self.global_index, "total_tasks": 1, "total_videos": len(VIDEO_KEYS), "total_chunks": (len(self.episodes) + 999) // 1000, "chunks_size": 1000, "data_path": "data/chunk-{episode_chunk:03d}/file-{episode_index:03d}.parquet", "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-{episode_index:03d}.mp4", "splits": {self.split: f"0:{len(self.episodes)}"}, "features": features,
-            "arx_eef": {"state_action_layout": EEF_NAMES, "action_alignment": "next_source_frame_state", "active_sides": list(self.spec.active_sides), "default_state_mask": self.active_mask.tolist(), "default_action_mask": self.active_mask.tolist(), "image_mask_order": IMAGE_MASK_NAMES, "coordinate_frame": "per-arm zero-flange frame", "gripper": "0=open, 1=closed"}}
+            "arx_eef": {"state_action_layout": EEF_NAMES, "action_alignment": "next_source_frame_state", "active_sides": list(self.spec.active_sides), "default_state_mask": self.active_mask.tolist(), "default_action_mask": self.active_mask.tolist(), "image_mask_order": IMAGE_MASK_NAMES, "coordinate_frame": "per-arm zero-flange frame", "gripper": "binary: 0=open, 1=closed; real raw >= -2.6 is closed"}}
         state, action = np.concatenate(self.states), np.concatenate(self.actions)
         stat = lambda x: {"min": x.min(0).tolist(), "max": x.max(0).tolist(), "mean": x.mean(0).tolist(), "std": x.std(0).tolist(), "count": [len(x)]}
         write_json(self.root / "meta" / "info.json", info)
@@ -289,7 +293,7 @@ class DatasetWriter:
         write_jsonl(self.root / "meta" / "tasks.jsonl", [{"task_index": 0, "task": self.spec.prompt}])
         write_jsonl(self.root / "meta" / "episodes.jsonl", self.episodes)
         write_jsonl(self.root / "meta" / "episodes_stats.jsonl", [])
-        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 2, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
+        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 3, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "gripper_binary_threshold_raw": DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
         return {"dataset": str(self.root), "episodes": len(self.episodes), "frames": self.global_index, "counts": self.counts}
 
 

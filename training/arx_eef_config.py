@@ -146,7 +146,7 @@ def build_config(
     if model == "pi0":
         model_config = pi0_config.Pi0Config(
             action_dim=MODEL_ACTION_DIM,
-            action_horizon=10,
+            action_horizon=50,
             paligemma_variant="gemma_2b_lora" if low_mem else "gemma_2b",
             action_expert_variant="gemma_300m_lora" if low_mem else "gemma_300m",
         )
@@ -155,7 +155,7 @@ def build_config(
         model_config = pi0_config.Pi0Config(
             pi05=True,
             action_dim=MODEL_ACTION_DIM,
-            action_horizon=10,
+            action_horizon=50,
             discrete_state_input=False,
             paligemma_variant="gemma_2b_lora" if low_mem else "gemma_2b",
             action_expert_variant="gemma_300m_lora" if low_mem else "gemma_300m",

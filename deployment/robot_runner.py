@@ -55,7 +55,7 @@ def start_pose_trajectory(
     grip = float(record["gripper_raw"])
     if target.shape != (6,) or not np.isfinite(target).all() or not np.isfinite(grip):
         raise ValueError("recorded start pose is malformed")
-    if np.any(target < JOINT_LOWER) or np.any(target > JOINT_UPPER) or not -3.14 <= grip <= 0.1:
+    if np.any(target < JOINT_LOWER) or np.any(target > JOINT_UPPER) or not -3.4 <= grip <= 0.1:
         raise ValueError("recorded start pose is outside joint or gripper limits")
     if current.shape != (7,) or not np.isfinite(current).all():
         raise ValueError("current robot feedback is malformed")
@@ -96,7 +96,9 @@ def move_to_start_pose(arm, frames: list[tuple[np.ndarray, float]], should_stop)
     deadline = time.monotonic() + 4.0
     while time.monotonic() < deadline and not should_stop():
         feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
-        if np.max(np.abs(feedback[:6] - frames[-1][0])) <= 0.05 and abs(float(feedback[6] - frames[-1][1])) <= 0.12:
+        # An object can stop the gripper before its requested endpoint.  Joint
+        # convergence is required here; endpoint gripper feedback is not.
+        if np.max(np.abs(feedback[:6] - frames[-1][0])) <= 0.05:
             print(f"START_POSE_REACHED {np.array2string(feedback, precision=5)}", flush=True)
             return
         time.sleep(0.1)
@@ -215,7 +217,9 @@ def main() -> int:
     if not args.execute:
         parser.error("hardware runner requires --execute through the guarded wrapper")
     if not 1 <= args.fps <= 10 or not 1 <= args.n_action_steps <= ACTION_HORIZON:
-        parser.error("fps must be [1, 10] and n-action-steps must be [1, 10]")
+        parser.error(
+            f"fps must be [1, 10] and n-action-steps must be [1, {ACTION_HORIZON}]"
+        )
     tcp_offset_m = np.asarray(TCP_OFFSET_M if args.tcp_offset_m is None else args.tcp_offset_m, dtype=np.float64)
     if not np.isfinite(tcp_offset_m).all() or np.linalg.norm(tcp_offset_m) > 0.30:
         parser.error("--tcp-offset-m must be finite and have magnitude at most 0.30 m")
@@ -307,7 +311,7 @@ def main() -> int:
                 print("PAUSED" if paused else "RESUMED", flush=True)
             if paused:
                 feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
-                send_target(arm, feedback[:6], float(np.clip(feedback[6], -3.14, 0.1)))
+                send_target(arm, feedback[:6], float(np.clip(feedback[6], -3.4, 0.1)))
                 time.sleep(period)
                 continue
             observation, feedback, tcp = read_observation(arm, rig, sdk, tcp_offset_m)

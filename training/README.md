@@ -55,19 +55,16 @@ frame, and writes `[xyz, qx, qy, qz, qw]`. The batch preprocessing stage
 performs the opposite EEF-to-joint IK operation for ego; final packaging
 converts the resulting joints back to the common EEF representation.
 
-The final training gripper feature is `float32` in `[0, 1]`:
+The final training gripper feature is binary `float32`:
 
 ```text
-g = clip((raw + 3.4) / 3.5, 0, 1)
+g = 1 if raw >= -2.6 else 0
 0 = fully open, 1 = fully closed
 ```
 
-It is not forcibly discretized by the final exporter. The ARX diagnostic
-adapter additionally provides a binary state using threshold `raw >= -2.6`,
-but training uses the continuous normalized value. Packaged ego trajectories
-are produced from binary grasp events and use raw endpoints `-3.4` / `0.1`,
-so their final gripper values are exactly `0` or `1`. Real recordings may have
-intermediate values, which are retained. In every final repository,
+The cotrain exporter applies the same `raw >= -2.6` threshold used by the ARX
+diagnostic adapter to real recordings, so real and packaged-ego examples share
+the same 0=open, 1=closed labels. In every final repository,
 `action[t]` is the next valid source-frame EEF state, including its gripper.
 
 ## 3. Produce an ego correction variant
@@ -120,6 +117,28 @@ Outputs:
 outputs/lerobot/local/arx_eef_stack_cube_real_all_nodropout_train/
 outputs/lerobot/local/arx_eef_stack_cola_real_all_nodropout_train/
 ```
+
+### Merge existing compatible LeRobot datasets
+
+For already-packaged LeRobot repositories (including three or more real-data
+collections), use the generic merger.  It appends episodes, remaps task IDs by
+task text, regenerates episode/global frame indices, and hard-links videos by
+default.  Source repositories are never modified.
+
+```bash
+$PY training/merge_lerobot_datasets.py \
+  --source-root /data/real_set_1 \
+  --source-root /data/real_set_2 \
+  --source-root /data/real_set_3 \
+  --output-root outputs/lerobot \
+  --repo-id local/stack_cola_real_merged \
+  --overwrite
+```
+
+Every source must have the same FPS, LeRobot feature metadata, parquet schema,
+and video streams.  Pass `--video-mode copy` when the output needs to survive
+after source files are removed; otherwise the default hard links avoid copying
+the video bytes.
 
 ### Co-train all real episodes with position+rotation ego
 

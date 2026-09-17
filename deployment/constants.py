@@ -25,7 +25,7 @@ TOKENIZER = Path(
     )
 ).expanduser()
 PROMPT = "pick the cube and stack it on the blue plate"
-ACTION_HORIZON = 10
+ACTION_HORIZON = 50
 CAMERA_SERIALS = {
     "head": "409122273248",
     "left": "260322272716",

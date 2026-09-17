@@ -13,6 +13,9 @@ from deployment.constants import TCP_OFFSET_M
 CANONICAL_LEFT = np.asarray([0, 0, 0, 0, 0, 0, 1, 0], dtype=np.float32)
 JOINT_LOWER = np.deg2rad([-150, 0, 0, -90, -90, -120])
 JOINT_UPPER = np.deg2rad([180, 210, 180, 90, 90, 120])
+GRIPPER_OPEN_RAW = -3.4
+GRIPPER_CLOSED_RAW = 0.1
+GRIPPER_BINARY_THRESHOLD_RAW = -2.6
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,9 @@ def flange_to_tcp_state(
     if offset.shape != (3,) or not np.isfinite(offset).all():
         raise ValueError("TCP offset must be three finite values")
     tcp_xyz = flange[:3] + orientation.apply(offset)
-    gripper = float(np.clip((gripper_raw + 3.4) / 3.5, 0.0, 1.0))
+    # Match the binary labels used by the cotrain exporter.  Feedback need not
+    # reach either endpoint while an object is held.
+    gripper = float(gripper_raw >= GRIPPER_BINARY_THRESHOLD_RAW)
     return np.asarray([*tcp_xyz, *orientation.as_quat(), gripper], dtype=np.float32)
 
 
@@ -84,7 +89,9 @@ def tcp_action_to_flange(
         raise ValueError("TCP offset must be three finite values")
     flange_xyz = target[:3] - target_rotation.apply(offset)
     flange_xyzrpy = np.asarray([*flange_xyz, *target_rotation.as_euler("xyz")], dtype=np.float64)
-    gripper_raw = float(np.clip(target[7] * 3.5 - 3.4, -3.14, 0.1))
+    # The policy is trained on binary grasp labels.  Command an endpoint so
+    # the gripper supplies holding force even when an object prevents closure.
+    gripper_raw = GRIPPER_CLOSED_RAW if target[7] > 0.5 else GRIPPER_OPEN_RAW
     return flange_xyzrpy, gripper_raw
 
 

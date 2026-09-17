@@ -79,7 +79,7 @@ class StartRequest(BaseModel):
     mode: str
     checkpoint_path: str = str(DEFAULT_CHECKPOINT_DIR)
     fps: float = Field(default=5.0, ge=1, le=10)
-    n_action_steps: int = Field(default=1, ge=1, le=10)
+    n_action_steps: int = Field(default=1, ge=1, le=50)
     start_pose: bool = False
     tcp_offset_m: tuple[float, float, float] = (0.15, 0.0, 0.0)
 

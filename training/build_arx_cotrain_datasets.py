@@ -53,6 +53,7 @@ class TaskSpec:
     variant: str
     prompt: str
     active_sides: tuple[str, ...]
+    real_root_override: Path | None = None
 
     @property
     def ego_root(self) -> Path:
@@ -60,6 +61,8 @@ class TaskSpec:
 
     @property
     def real_root(self) -> Path:
+        if self.real_root_override is not None:
+            return self.real_root_override
         return REPO_ROOT.parent / "Data_TATE" / f"{self.name}_arx"
 
     @property
@@ -90,6 +93,22 @@ def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as file:
         for record in records:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def dataset_single_task_prompt(root: Path) -> str:
+    """Read the sole task text from a raw LeRobot dataset's metadata."""
+    path = root / "meta" / "tasks.jsonl"
+    if path.is_file():
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    else:
+        path = root / "meta" / "tasks.parquet"
+        if not path.is_file():
+            raise FileNotFoundError(f"custom task dataset needs {root / 'meta/tasks.jsonl'} or {path}")
+        records = pq.read_table(path).to_pylist()
+    prompts = {str(record["task"]) for record in records if "task" in record}
+    if len(prompts) != 1:
+        raise ValueError(f"custom task dataset must have exactly one task in {path}; found {sorted(prompts)}")
+    return prompts.pop()
 
 
 def episode_files(root: Path) -> list[Path]:
@@ -387,7 +406,9 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tasks", nargs="+", choices=sorted(TASKS), default=sorted(TASKS))
+    parser.add_argument("--tasks", nargs="+", choices=sorted(TASKS), default=None)
+    parser.add_argument("--task-name", default=None, help="Custom real-only task ID used in the output dataset name.")
+    parser.add_argument("--real-dataset", type=Path, default=None, help="Custom raw LeRobot root. Use with --task-name for a new real-only task.")
     parser.add_argument("--ego-experiment", default=None, help="Override the ego experiment directory for every selected task.")
     parser.add_argument("--ego-variant", default=None, help="Override the ego dataset variant directory for every selected task.")
     parser.add_argument("--sources", nargs="+", choices=("ego", "real"), default=("ego", "real"), help="Sources to include (default: ego real).")
@@ -417,10 +438,27 @@ def main() -> None:
     if np.any(probabilities < 0) or not np.isclose(probabilities.sum(), 1):
         parser.error("--real-camera-mask-probs must be non-negative and sum to one")
     args.output_root, args.scene, args.calibration = args.output_root.resolve(), args.scene.resolve(), args.calibration.resolve()
+    custom_values = (args.task_name, args.real_dataset)
+    if any(value is not None for value in custom_values):
+        if not all(value is not None for value in custom_values):
+            parser.error("provide both --task-name and --real-dataset for a custom task")
+        if args.tasks is not None:
+            parser.error("--task-name/--real-dataset cannot be combined with --tasks")
+        if tuple(args.sources) != ("real",):
+            parser.error("a custom task currently supports only --sources real")
+        if not args.single_train_split:
+            parser.error("a custom task requires --single-train-split")
+        if not args.task_name or "/" in args.task_name:
+            parser.error("--task-name must be a non-empty name without '/'")
+        real_root = args.real_dataset.expanduser().resolve()
+        prompt = dataset_single_task_prompt(real_root)
+        specs = [TaskSpec(args.task_name, "custom", "unused", prompt, ("right",), real_root)]
+    else:
+        specs = [TASKS[name] for name in (args.tasks or sorted(TASKS))]
     result = []
     for mode in args.dataset_modes:
-        for name in args.tasks:
-            spec = TASKS[name]
+        for original_spec in specs:
+            spec = original_spec
             if args.ego_experiment is not None or args.ego_variant is not None:
                 spec = replace(
                     spec,

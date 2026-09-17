@@ -115,7 +115,12 @@ def task_names(episode: dict[str, Any], source_tasks: dict[int, str]) -> list[st
 
 
 def merged_stats(roots: list[Path]) -> dict[str, Any] | None:
-    """Combine LeRobot min/max/mean/std/count statistics exactly."""
+    """Combine the portable min/max/mean/std/count part of LeRobot stats.
+
+    Recent LeRobot versions also add quantile fields (``q01`` etc.).  Exact
+    merged quantiles cannot be recovered from per-dataset summaries, so they
+    are deliberately omitted rather than copied incorrectly.
+    """
     paths = [root / "meta" / "stats.json" for root in roots]
     if not any(path.is_file() for path in paths):
         return None
@@ -127,13 +132,21 @@ def merged_stats(roots: list[Path]) -> dict[str, Any] | None:
     output: dict[str, Any] = {}
     for feature in inputs[0]:
         records = [value[feature] for value in inputs]
-        if any(set(record) != {"min", "max", "mean", "std", "count"} for record in records):
+        required = {"min", "max", "mean", "std", "count"}
+        if any(not required.issubset(record) for record in records):
             raise ValueError(f"unsupported stats structure for {feature!r}")
-        arrays = {name: [np.asarray(record[name], dtype=np.float64) for record in records] for name in records[0]}
+        arrays = {name: [np.asarray(record[name], dtype=np.float64) for record in records] for name in required}
         shape = arrays["mean"][0].shape
-        if any(value.shape != shape for values in arrays.values() for value in values):
+        for name in ("min", "max", "mean", "std"):
+            if any(value.shape != shape for value in arrays[name]):
+                raise ValueError(f"stats shapes differ for {feature!r}")
+        count_shape = arrays["count"][0].shape
+        if any(value.shape != count_shape for value in arrays["count"]):
             raise ValueError(f"stats shapes differ for {feature!r}")
-        counts = np.stack(arrays["count"])
+        raw_counts = np.stack(arrays["count"])
+        counts = raw_counts
+        while counts.ndim < np.stack(arrays["mean"]).ndim:
+            counts = counts[..., None]
         if np.any(counts <= 0):
             raise ValueError(f"non-positive stats count for {feature!r}")
         means = np.stack(arrays["mean"])
@@ -145,7 +158,7 @@ def merged_stats(roots: list[Path]) -> dict[str, Any] | None:
             "max": np.max(np.stack(arrays["max"]), axis=0).tolist(),
             "mean": mean.tolist(),
             "std": np.sqrt(np.maximum(variance, 0)).tolist(),
-            "count": total.tolist(),
+            "count": np.sum(raw_counts, axis=0).tolist(),
         }
     return output
 

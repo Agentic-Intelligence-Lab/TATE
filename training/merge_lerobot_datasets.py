@@ -26,9 +26,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
 def jsonl_read(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
@@ -240,7 +237,7 @@ def merge(args: argparse.Namespace) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", action="append", dest="source_roots", required=True, help="Input LeRobot root; repeat for every dataset, in append order.")
-    parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "outputs" / "lerobot")
+    parser.add_argument("--output-root", type=Path, required=True, help="Directory under which --repo-id will be created.")
     parser.add_argument("--repo-id", required=True, help="Output directory relative to --output-root, e.g. local/my_merged_dataset.")
     parser.add_argument("--split", default="train", help="Name of the single output split (default: train).")
     parser.add_argument("--video-mode", choices=("hardlink", "copy"), default="hardlink")

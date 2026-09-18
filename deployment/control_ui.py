@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import pty
@@ -355,15 +356,24 @@ class ProcessManager:
             except ProcessLookupError:
                 pass
 
-    def resume(self) -> bool:
+    def resume(self, *, fps: float, n_action_steps: int, gripper_threshold: float, tcp_offset_m: tuple[float, float, float]) -> bool:
         with self.lock:
-            if self.mode != "holding" or self.process is None or self.process.poll() is not None:
+            if self.mode != "holding" or self.process is None or self.process.poll() is not None or self.master_fd is None:
                 return False
             robot_pid = self._robot_pid(self.process.pid)
             if robot_pid is None:
                 raise HTTPException(409, "机器人保持进程未就绪")
-            os.kill(robot_pid, signal.SIGCONT)
-            self.last_result = "正在从最终位置继续测试"
+            command = json.dumps(
+                {
+                    "fps": fps,
+                    "n_action_steps": n_action_steps,
+                    "gripper_threshold": gripper_threshold,
+                    "tcp_offset_m": tcp_offset_m,
+                },
+                separators=(",", ":"),
+            )
+            os.write(self.master_fd, ("RESUME " + command + "\n").encode("utf-8"))
+            self.last_result = "正在应用新参数并继续测试"
             return True
 
     def reset_held_robot(self) -> bool:
@@ -562,7 +572,15 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
             raise HTTPException(503, f"策略服务不可用: {exc}") from exc
         manager.logs.append(f"SMOKE_INFERENCE_OK {result}")
         return {"ok": True, **manager.policy_snapshot(selected)}
-    if manager.resume():
+    tcp_offset = tuple(float(value) for value in req.tcp_offset_m)
+    if not all(math.isfinite(value) for value in tcp_offset) or math.sqrt(sum(value * value for value in tcp_offset)) > 0.30:
+        raise HTTPException(400, "TCP offset 必须是有限的三个数，且模长不超过 0.30 m")
+    if manager.resume(
+        fps=req.fps,
+        n_action_steps=req.n_action_steps,
+        gripper_threshold=req.gripper_threshold,
+        tcp_offset_m=tcp_offset,
+    ):
         return {"ok": True, "mode": "testing"}
     command = [str(WRAPPER), "--execute"]
     mode = "preparing"
@@ -572,9 +590,6 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
             "--n-action-steps", str(req.n_action_steps),
             "--gripper-threshold", str(req.gripper_threshold),
         ]
-        tcp_offset = tuple(float(value) for value in req.tcp_offset_m)
-        if not all(math.isfinite(value) for value in tcp_offset) or math.sqrt(sum(value * value for value in tcp_offset)) > 0.30:
-            raise HTTPException(400, "TCP offset 必须是有限的三个数，且模长不超过 0.30 m")
         command += ["--tcp-offset-m", *(str(value) for value in tcp_offset)]
         if req.start_pose:
             command.append("--start-pose")

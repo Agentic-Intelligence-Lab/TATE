@@ -205,6 +205,29 @@ def wait_for_start_pose(should_stop) -> bool:
     return False
 
 
+def parse_resume_config(line: str) -> tuple[float, int, float, np.ndarray]:
+    """Validate runtime parameters sent by the console while the arm is held."""
+    if not line.startswith("RESUME "):
+        raise ValueError("expected RESUME command")
+    try:
+        value = json.loads(line.removeprefix("RESUME "))
+        fps = float(value["fps"])
+        n_action_steps = int(value["n_action_steps"])
+        gripper_threshold = float(value["gripper_threshold"])
+        tcp_offset_m = np.asarray(value["tcp_offset_m"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid resume configuration") from exc
+    if not np.isfinite(fps) or not 1 <= fps <= 10:
+        raise ValueError("resume fps must be in [1, 10]")
+    if not 1 <= n_action_steps <= ACTION_HORIZON:
+        raise ValueError(f"resume n_action_steps must be in [1, {ACTION_HORIZON}]")
+    if not np.isfinite(gripper_threshold) or not 0 <= gripper_threshold <= 1:
+        raise ValueError("resume gripper_threshold must be in [0, 1]")
+    if tcp_offset_m.shape != (3,) or not np.isfinite(tcp_offset_m).all() or np.linalg.norm(tcp_offset_m) > 0.30:
+        raise ValueError("resume tcp_offset_m is invalid")
+    return fps, n_action_steps, gripper_threshold, tcp_offset_m
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
@@ -383,6 +406,25 @@ def main() -> int:
             hold_joints, hold_gripper = feedback[:6].copy(), float(np.clip(feedback[6], -3.4, 0.1))
             print(f"HOLDING_POSITION joints={np.array2string(hold_joints, precision=5)} gripper_raw={hold_gripper:.5f}", flush=True)
             while not reset_requested and not resume_requested:
+                readable, _, _ = select.select([sys.stdin], [], [], 0)
+                if readable:
+                    line = sys.stdin.readline().strip()
+                    try:
+                        fps, n_action_steps, gripper_threshold, tcp_offset_m = parse_resume_config(line)
+                        args.fps = fps
+                        args.n_action_steps = n_action_steps
+                        args.gripper_threshold = gripper_threshold
+                        print(
+                            "RESUME_CONFIG "
+                            f"fps={args.fps:.3f} n_action_steps={args.n_action_steps} "
+                            f"gripper_threshold={args.gripper_threshold:.4f} "
+                            f"tcp_offset_m={np.array2string(tcp_offset_m, precision=6)}",
+                            flush=True,
+                        )
+                        resume_requested = True
+                        continue
+                    except ValueError as exc:
+                        print(f"RESUME_CONFIG_REJECTED {exc}", flush=True)
                 send_target(arm, hold_joints, hold_gripper)
                 time.sleep(0.2)
             if reset_requested:
@@ -406,6 +448,7 @@ def main() -> int:
             hold_requested = False
             stop = False
             paused = False
+            period = 1.0 / args.fps
             print("RESUMED_FROM_HOLD", flush=True)
     finally:
         if arm is not None:

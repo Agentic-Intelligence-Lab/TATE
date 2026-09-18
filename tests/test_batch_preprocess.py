@@ -17,7 +17,6 @@ from preprocess.batch.dataset import (
 )
 from preprocess.batch.lerobot import _package_one_variant, build_episode_table, numeric_stats
 from preprocess.batch.runner import _override_incompatible_experiment
-from preprocess.batch_preprocess import parse_stages
 
 
 def fixed_list(values: np.ndarray) -> pa.Array:
@@ -64,16 +63,6 @@ def eef_payload(valid_left=(True, False), valid_right=(True, True)) -> dict:
 
 
 class BatchPreprocessTest(unittest.TestCase):
-    def test_default_stages_skip_retarget_but_all_includes_it(self):
-        self.assertEqual(
-            parse_stages("default"),
-            {"wilor", "eef", "correct", "visualize", "package"},
-        )
-        self.assertEqual(
-            parse_stages("all"),
-            {"wilor", "eef", "correct", "retarget", "visualize", "package"},
-        )
-
     def test_override_removes_only_an_incompatible_experiment(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -31,6 +31,7 @@ from real_data.arx_lerobot_adapter import (
     ArxForwardKinematics,
     DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW,
 )
+from preprocess.batch.dataset import materialize_video_segment
 
 
 OUTPUT_ROOT = REPO_ROOT / "outputs" / "lerobot"
@@ -76,6 +77,7 @@ TASKS = {
     # Keep this synchronized with cfg/preprocess/batch/stack_cola_v2.yaml,
     # whose experiment_id is stack_cola_v2_50 and corrected default is pos+rot.
     "stack_cola": TaskSpec("stack_cola", "stack_cola_v2_50", "finger_center_hys085__position_rotation", "pick two colas and stack them on the brown box", ("left", "right")),
+    "stack_redcube_v2": TaskSpec("stack_redcube_v2", "stack_redcube_v2_2", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
 }
 
 
@@ -160,6 +162,23 @@ def valid_rows(table: pa.Table, source: str, active_sides: tuple[str, ...]) -> n
             valid = np.asarray(table[key].to_pylist(), dtype=bool)
             keep &= valid[:-1] & valid[1:]
     return keep
+
+
+def contiguous_runs(indices: np.ndarray) -> list[np.ndarray]:
+    """Split sorted source-row indices into maximal contiguous runs.
+
+    Invalid ego EEF frames are omitted from the training labels.  A single
+    LeRobot episode cannot contain the resulting timestamp/frame-index gap,
+    and a policy action horizon must not cross it.  Each run therefore becomes
+    an independent output episode.
+    """
+    indices = np.asarray(indices, dtype=np.int64)
+    if not len(indices):
+        return []
+    if np.any(np.diff(indices) <= 0):
+        raise ValueError("indices must be strictly increasing")
+    boundaries = np.flatnonzero(np.diff(indices) != 1) + 1
+    return [run for run in np.split(indices, boundaries) if len(run)]
 
 
 def continuous_quaternions(values: np.ndarray) -> np.ndarray:
@@ -260,9 +279,27 @@ class DatasetWriter:
         self.image_counts = {"head_left_right": 0, "head_only": 0, "head_left": 0, "head_right": 0}
         self.counts = {"ego": {"episodes": 0, "frames": 0}, "real": {"episodes": 0, "frames": 0}}
 
-    def add(self, *, source: str, source_root: Path, source_episode: int, selected: np.ndarray, state: np.ndarray, action: np.ndarray, timestamp: np.ndarray, frame_index: np.ndarray, image_mask: np.ndarray) -> None:
+    def add(
+        self,
+        *,
+        source: str,
+        source_root: Path,
+        source_episode: int,
+        selected: np.ndarray,
+        source_length: int,
+        state: np.ndarray,
+        action: np.ndarray,
+        source_frame_index: np.ndarray,
+        image_mask: np.ndarray,
+    ) -> None:
         episode, length = len(self.episodes), len(state)
+        if length == 0 or len(action) != length or len(source_frame_index) != length:
+            raise ValueError("state, action, and source_frame_index must be non-empty and aligned")
+        if not np.array_equal(selected, np.arange(selected[0], selected[0] + length)):
+            raise ValueError("an output episode must be a contiguous source-frame run")
         mask = np.broadcast_to(self.active_mask, (length, EEF_DIM))
+        timestamp = np.arange(length, dtype=np.float32) / float(self.source_info["fps"])
+        frame_index = np.arange(length, dtype=np.int64)
         table = pa.table({
             "observation.state": pa.array(state.tolist(), type=pa.list_(pa.float32(), EEF_DIM)),
             "action": pa.array(action.tolist(), type=pa.list_(pa.float32(), EEF_DIM)),
@@ -275,15 +312,43 @@ class DatasetWriter:
             "policy.image_mask": pa.array(image_mask.tolist(), type=pa.list_(pa.bool_(), 3)),
             "policy.domain": pa.array(np.full(length, 0 if source == "ego" else 1, dtype=np.int8)),
             "policy.source_episode_index": pa.array(np.full(length, source_episode, dtype=np.int64)),
-            "policy.source_frame_index": pa.array(frame_index, type=pa.int64()),
+            "policy.source_frame_index": pa.array(source_frame_index, type=pa.int64()),
         }).replace_schema_metadata(None)
         path = self.root / "data" / f"chunk-{episode // 1000:03d}" / f"file-{episode:03d}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path, compression="zstd")
         for key in VIDEO_KEYS:
-            link_or_copy(source_video(source_root, key, source_episode), self.root / "videos" / key / f"chunk-{episode // 1000:03d}" / f"file-{episode:03d}.mp4")
+            destination = (
+                self.root
+                / "videos"
+                / key
+                / f"chunk-{episode // 1000:03d}"
+                / f"file-{episode:03d}.mp4"
+            )
+            video = source_video(source_root, key, source_episode)
+            # A full valid episode may retain the source video.  Split runs
+            # require their own clip: its frame zero must match row zero, and
+            # the trailing frame supplies the final t -> t+1 action target.
+            if int(selected[0]) == 0 and length + 1 == source_length:
+                link_or_copy(video, destination)
+            else:
+                materialize_video_segment(
+                    video,
+                    destination,
+                    start_frame=int(selected[0]),
+                    frame_count=length + 1,
+                )
         self.episodes.append({"episode_index": episode, "tasks": [0], "length": length})
-        self.provenance.append({"output_episode_index": episode, "source_domain": source, "source_episode_index": source_episode, "source_frame_range": [int(selected[0]), int(selected[-1])], "frames": length})
+        self.provenance.append(
+            {
+                "output_episode_index": episode,
+                "source_domain": source,
+                "source_episode_index": source_episode,
+                "source_frame_range": [int(selected[0]), int(selected[-1])],
+                "video_source_frame_range": [int(selected[0]), int(selected[-1]) + 1],
+                "frames": length,
+            }
+        )
         self.counts[source]["episodes"] += 1
         self.counts[source]["frames"] += length
         self.states.append(state); self.actions.append(action); self.global_index += length
@@ -392,15 +457,31 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
             # Convert each original episode once so that state[t + 1] and
             # action[t] share exactly the same quaternion hemisphere.
             eef = apply_arm_mask(joints_to_eef(joints, fk), active_mask)
-            state, action = eef[selected], eef[selected + 1]
-            timestamp = np.asarray(table["timestamp"].to_pylist(), dtype=np.float32)[selected]
-            frames = np.asarray(table["frame_index"].to_pylist(), dtype=np.int64)[selected]
             if source == "ego":
-                split, image_mask = "train", np.tile(np.asarray([1, 0, 0], dtype=bool), (len(selected), 1))
+                split = "train"
             else:
                 split = "train" if source_ep in train_ids else "eval"
-                image_mask = choose_real_image_masks(len(selected), camera_dropout and split == "train", probabilities, rng)
-            writers[split].add(source=source, source_root=root, source_episode=source_ep, selected=selected, state=state, action=action, timestamp=timestamp, frame_index=frames, image_mask=image_mask)
+            source_frames = np.asarray(table["frame_index"].to_pylist(), dtype=np.int64)
+            for run in contiguous_runs(selected):
+                state, action = eef[run], eef[run + 1]
+                run_image_mask = (
+                    np.tile(np.asarray([1, 0, 0], dtype=bool), (len(run), 1))
+                    if source == "ego"
+                    else choose_real_image_masks(
+                        len(run), camera_dropout and split == "train", probabilities, rng
+                    )
+                )
+                writers[split].add(
+                    source=source,
+                    source_root=root,
+                    source_episode=source_ep,
+                    selected=run,
+                    source_length=len(table),
+                    state=state,
+                    action=action,
+                    source_frame_index=source_frames[run],
+                    image_mask=run_image_mask,
+                )
     return [writers[split].finish() for split in splits]
 
 

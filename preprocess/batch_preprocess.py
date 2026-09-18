@@ -11,7 +11,6 @@ from preprocess.batch.runner import BatchRunner, STAGE_ORDER as PIPELINE_STAGE_O
 
 
 STAGE_ORDER = (*PIPELINE_STAGE_ORDER[:-1], "visualize", PIPELINE_STAGE_ORDER[-1])
-DEFAULT_STAGES = tuple(stage for stage in STAGE_ORDER if stage != "retarget")
 
 
 def parse_ids(value: str | None) -> set[int] | None:
@@ -39,8 +38,6 @@ def parse_names(value: str | None) -> set[str] | None:
 
 
 def parse_stages(value: str) -> set[str]:
-    if value == "default":
-        return set(DEFAULT_STAGES)
     if value == "all":
         return set(STAGE_ORDER)
     stages = parse_names(value) or set()
@@ -82,11 +79,8 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Batch experiment YAML")
     parser.add_argument(
         "--stages",
-        default="default",
-        help=(
-            "default (wilor,eef,correct,visualize,package), all, or comma-separated "
-            "wilor,eef,correct,retarget,visualize,package"
-        ),
+        default="all",
+        help="all or comma-separated wilor,eef,correct,retarget,visualize,package",
     )
     parser.add_argument("--episodes", default=None, help="IDs/ranges, e.g. 0,2,5:9")
     parser.add_argument("--variants", default=None, help="Comma-separated run IDs")

@@ -55,9 +55,9 @@ session loads the model, observes the live cameras and right-arm state, and
 shows the first guarded target. Send `RUN` after reviewing that target.
 The preparation phase does not send
 joint or gripper motion commands. Hardware execution is right-arm-only, defaults
-to an action pacing limit of 5 Hz and one action per inference, and stops after
+to an action pacing limit of 5 Hz and 50 actions per inference, and stops after
 five minutes. On the training L20Y, dummy-image inference without Torch
-compilation took 1.09 seconds, so the actual inference rate is lower than 5 Hz.
+compilation took 1.09 seconds, so the actual inference rate is lower than the selected limit.
 The console's gripper threshold defaults to `0.5`: a predicted continuous grasp
 value greater than this value commands closure; otherwise it commands opening.
 Pause, stop, and the existing ARX reset wrapper are available on the page. The hardware

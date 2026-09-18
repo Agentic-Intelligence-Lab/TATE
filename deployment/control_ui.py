@@ -82,8 +82,8 @@ def fold_task_active() -> bool:
 class StartRequest(BaseModel):
     mode: str
     checkpoint_path: str = str(DEFAULT_CHECKPOINT_DIR)
-    fps: float = Field(default=5.0, ge=1, le=10)
-    n_action_steps: int = Field(default=1, ge=1, le=50)
+    fps: float = Field(default=5.0, ge=1, le=50)
+    n_action_steps: int = Field(default=50, ge=1, le=50)
     gripper_threshold: float = Field(default=0.5, ge=0, le=1)
     start_pose: bool = False
     tcp_offset_m: tuple[float, float, float] = (0.15, 0.0, 0.0)
@@ -356,7 +356,7 @@ class ProcessManager:
             except ProcessLookupError:
                 pass
 
-    def resume(self, *, fps: float, n_action_steps: int, gripper_threshold: float, tcp_offset_m: tuple[float, float, float]) -> bool:
+    def resume(self, *, fps: float, n_action_steps: int, gripper_threshold: float, tcp_offset_m: tuple[float, float, float], start_pose: bool) -> bool:
         with self.lock:
             if self.mode != "holding" or self.process is None or self.process.poll() is not None or self.master_fd is None:
                 return False
@@ -369,11 +369,13 @@ class ProcessManager:
                     "n_action_steps": n_action_steps,
                     "gripper_threshold": gripper_threshold,
                     "tcp_offset_m": tcp_offset_m,
+                    "start_pose": start_pose,
                 },
                 separators=(",", ":"),
             )
             os.write(self.master_fd, ("RESUME " + command + "\n").encode("utf-8"))
             self.last_result = "正在应用新参数并继续测试"
+            self.mode = "preparing"
             return True
 
     def reset_held_robot(self) -> bool:
@@ -580,6 +582,7 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
         n_action_steps=req.n_action_steps,
         gripper_threshold=req.gripper_threshold,
         tcp_offset_m=tcp_offset,
+        start_pose=req.start_pose,
     ):
         return {"ok": True, "mode": "testing"}
     command = [str(WRAPPER), "--execute"]

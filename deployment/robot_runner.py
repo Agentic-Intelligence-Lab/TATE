@@ -182,6 +182,26 @@ def guarded_target(
     return joints, gripper_raw, flange
 
 
+def preflight_target(arm, rig, sdk, limits: GuardLimits, tcp_offset_m: np.ndarray, args) -> None:
+    """Inspect one fresh policy target before accepting a RUN command."""
+    observation, feedback, tcp = read_observation(arm, rig, sdk, tcp_offset_m)
+    actions, latency = infer(args.policy_url, observation, args.max_policy_latency + 1)
+    if latency > args.max_policy_latency:
+        raise RuntimeError(f"preflight policy latency {latency:.2f}s exceeds watchdog")
+    first_target = actions[0, 8:16]
+    delta_xyz = first_target[:3] - tcp[:3]
+    print(f"FIRST_CURRENT_TCP {np.array2string(tcp, precision=5)}", flush=True)
+    print(f"FIRST_CURRENT_JOINTS {np.array2string(feedback, precision=5)}", flush=True)
+    print(f"FIRST_TARGET_TCP {np.array2string(first_target, precision=5)}", flush=True)
+    print(f"FIRST_TCP_DELTA_XYZ {np.array2string(delta_xyz, precision=5)} norm_m={np.linalg.norm(delta_xyz):.5f}", flush=True)
+    print(f"FIRST_POLICY_LATENCY {latency:.3f}s", flush=True)
+    joints, gripper_raw, flange = guarded_target(
+        sdk, actions[0], feedback, tcp, limits, tcp_offset_m, args.gripper_threshold
+    )
+    print(f"FIRST_TARGET_FLANGE {np.array2string(flange, precision=5)}", flush=True)
+    print(f"FIRST_TARGET_JOINTS {np.array2string(joints, precision=5)} gripper_raw={gripper_raw:.4f}", flush=True)
+
+
 def send_target(arm, joints: np.ndarray, gripper_raw: float) -> None:
     if arm.fault is not None:
         raise RuntimeError(f"right arm fault: {arm.fault}")
@@ -212,7 +232,7 @@ def wait_for_start_pose(should_stop) -> bool:
     return False
 
 
-def parse_resume_config(line: str) -> tuple[float, int, float, np.ndarray]:
+def parse_resume_config(line: str) -> tuple[float, int, float, np.ndarray, bool]:
     """Validate runtime parameters sent by the console while the arm is held."""
     if not line.startswith("RESUME "):
         raise ValueError("expected RESUME command")
@@ -222,17 +242,20 @@ def parse_resume_config(line: str) -> tuple[float, int, float, np.ndarray]:
         n_action_steps = int(value["n_action_steps"])
         gripper_threshold = float(value["gripper_threshold"])
         tcp_offset_m = np.asarray(value["tcp_offset_m"], dtype=np.float64)
+        start_pose = value["start_pose"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("invalid resume configuration") from exc
-    if not np.isfinite(fps) or not 1 <= fps <= 10:
-        raise ValueError("resume fps must be in [1, 10]")
+    if not np.isfinite(fps) or not 1 <= fps <= 50:
+        raise ValueError("resume fps must be in [1, 50]")
     if not 1 <= n_action_steps <= ACTION_HORIZON:
         raise ValueError(f"resume n_action_steps must be in [1, {ACTION_HORIZON}]")
     if not np.isfinite(gripper_threshold) or not 0 <= gripper_threshold <= 1:
         raise ValueError("resume gripper_threshold must be in [0, 1]")
     if tcp_offset_m.shape != (3,) or not np.isfinite(tcp_offset_m).all() or np.linalg.norm(tcp_offset_m) > 0.30:
         raise ValueError("resume tcp_offset_m is invalid")
-    return fps, n_action_steps, gripper_threshold, tcp_offset_m
+    if not isinstance(start_pose, bool):
+        raise ValueError("resume start_pose must be boolean")
+    return fps, n_action_steps, gripper_threshold, tcp_offset_m, start_pose
 
 
 def main() -> int:
@@ -241,7 +264,7 @@ def main() -> int:
     parser.add_argument("--start-pose", action="store_true", help="move to recorded episode 0 frame 60 before inference")
     parser.add_argument("--policy-url", default="http://127.0.0.1:8019")
     parser.add_argument("--fps", type=float, default=5.0)
-    parser.add_argument("--n-action-steps", type=int, default=1)
+    parser.add_argument("--n-action-steps", type=int, default=50)
     parser.add_argument(
         "--gripper-threshold",
         type=float,
@@ -258,9 +281,9 @@ def main() -> int:
     args = parser.parse_args()
     if not args.execute:
         parser.error("hardware runner requires --execute through the guarded wrapper")
-    if not 1 <= args.fps <= 10 or not 1 <= args.n_action_steps <= ACTION_HORIZON:
+    if not 1 <= args.fps <= 50 or not 1 <= args.n_action_steps <= ACTION_HORIZON:
         parser.error(
-            f"fps must be [1, 10] and n-action-steps must be [1, {ACTION_HORIZON}]"
+            f"fps must be [1, 50] and n-action-steps must be [1, {ACTION_HORIZON}]"
         )
     if not np.isfinite(args.gripper_threshold) or not 0.0 <= args.gripper_threshold <= 1.0:
         parser.error("--gripper-threshold must be in [0, 1]")
@@ -279,6 +302,7 @@ def main() -> int:
     hold_requested = False
     reset_requested = False
     resume_requested = False
+    resume_start_pose = False
     normal_completion = False
 
     def request_stop(_signal, _frame):
@@ -346,22 +370,7 @@ def main() -> int:
             print("MOVE accepted; moving right arm to recorded start pose", flush=True)
             move_to_start_pose(arm, frames, lambda: stop)
             # Images and state must be read again after the arm has moved.
-        observation, feedback, tcp = read_observation(arm, rig, sdk, tcp_offset_m)
-        actions, latency = infer(args.policy_url, observation, args.max_policy_latency + 1)
-        if latency > args.max_policy_latency:
-            raise RuntimeError(f"preflight policy latency {latency:.2f}s exceeds watchdog")
-        first_target = actions[0, 8:16]
-        delta_xyz = first_target[:3] - tcp[:3]
-        print(f"FIRST_CURRENT_TCP {np.array2string(tcp, precision=5)}", flush=True)
-        print(f"FIRST_CURRENT_JOINTS {np.array2string(feedback, precision=5)}", flush=True)
-        print(f"FIRST_TARGET_TCP {np.array2string(first_target, precision=5)}", flush=True)
-        print(f"FIRST_TCP_DELTA_XYZ {np.array2string(delta_xyz, precision=5)} norm_m={np.linalg.norm(delta_xyz):.5f}", flush=True)
-        print(f"FIRST_POLICY_LATENCY {latency:.3f}s", flush=True)
-        joints, gripper_raw, flange = guarded_target(
-            sdk, actions[0], feedback, tcp, limits, tcp_offset_m, args.gripper_threshold
-        )
-        print(f"FIRST_TARGET_FLANGE {np.array2string(flange, precision=5)}", flush=True)
-        print(f"FIRST_TARGET_JOINTS {np.array2string(joints, precision=5)} gripper_raw={gripper_raw:.4f}", flush=True)
+        preflight_target(arm, rig, sdk, limits, tcp_offset_m, args)
         if not wait_for_run(lambda: stop):
             print("RUN not confirmed; no motion action sent", flush=True)
             return 2
@@ -417,7 +426,7 @@ def main() -> int:
                 if readable:
                     line = sys.stdin.readline().strip()
                     try:
-                        fps, n_action_steps, gripper_threshold, tcp_offset_m = parse_resume_config(line)
+                        fps, n_action_steps, gripper_threshold, tcp_offset_m, resume_start_pose = parse_resume_config(line)
                         args.fps = fps
                         args.n_action_steps = n_action_steps
                         args.gripper_threshold = gripper_threshold
@@ -425,7 +434,8 @@ def main() -> int:
                             "RESUME_CONFIG "
                             f"fps={args.fps:.3f} n_action_steps={args.n_action_steps} "
                             f"gripper_threshold={args.gripper_threshold:.4f} "
-                            f"tcp_offset_m={np.array2string(tcp_offset_m, precision=6)}",
+                            f"tcp_offset_m={np.array2string(tcp_offset_m, precision=6)} "
+                            f"start_pose={resume_start_pose}",
                             flush=True,
                         )
                         resume_requested = True
@@ -456,6 +466,18 @@ def main() -> int:
             stop = False
             paused = False
             period = 1.0 / args.fps
+            if resume_start_pose:
+                initial = np.asarray(arm.get_joint_positions(), dtype=np.float64)
+                frames, record = start_pose_trajectory(sdk, initial, limits, tcp_offset_m)
+                print(f"START_POSE_SOURCE episode={record['episode_index']} frame={record['frame_index']} side={record['side']}", flush=True)
+                print(f"START_POSE_CURRENT_JOINTS {np.array2string(initial, precision=5)}", flush=True)
+                print(f"START_POSE_TARGET_JOINTS {np.array2string(frames[-1][0], precision=5)} gripper_raw={frames[-1][1]:.5f}", flush=True)
+                print(f"START_POSE_RAMP frames={len(frames)} rate_hz=5 automatic_resume=true", flush=True)
+                move_to_start_pose(arm, frames, lambda: stop)
+                preflight_target(arm, rig, sdk, limits, tcp_offset_m, args)
+                if not wait_for_run(lambda: stop):
+                    print("RUN not confirmed after start pose; no motion action sent", flush=True)
+                    return 2
             print("RESUMED_FROM_HOLD", flush=True)
     finally:
         if arm is not None:

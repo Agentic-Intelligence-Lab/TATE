@@ -262,7 +262,9 @@ def load_experiment_config(path: str | Path) -> dict[str, Any]:
     lerobot["video_mode"] = str(lerobot.get("video_mode", "hardlink"))
     if lerobot["video_mode"] not in {"hardlink", "copy"}:
         raise ValueError("lerobot.video_mode must be 'hardlink' or 'copy'")
-    lerobot["replace_state_action"] = bool(lerobot.get("replace_state_action", True))
+    # Packaging normally preserves the source robot state/action. Retargeted
+    # policy targets are an explicit opt-in because IK is not a default stage.
+    lerobot["replace_state_action"] = bool(lerobot.get("replace_state_action", False))
     lerobot["require_all_episodes"] = bool(lerobot.get("require_all_episodes", True))
     lerobot["action_alignment"] = str(lerobot.get("action_alignment", "same_frame"))
     if lerobot["action_alignment"] not in {"same_frame", "next_frame"}:

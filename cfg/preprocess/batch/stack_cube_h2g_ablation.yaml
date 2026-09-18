@@ -103,7 +103,7 @@ lerobot:
   enabled: true
   task: "pick the cube and stack it on the blue plate"
   video_mode: hardlink
-  replace_state_action: true
+  replace_state_action: false
   action_alignment: same_frame
   gripper_open_raw: -3.4
   gripper_closed_raw: 0.1

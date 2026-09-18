@@ -11,6 +11,7 @@ from preprocess.batch.runner import BatchRunner, STAGE_ORDER as PIPELINE_STAGE_O
 
 
 STAGE_ORDER = (*PIPELINE_STAGE_ORDER[:-1], "visualize", PIPELINE_STAGE_ORDER[-1])
+DEFAULT_STAGES = tuple(stage for stage in STAGE_ORDER if stage != "retarget")
 
 
 def parse_ids(value: str | None) -> set[int] | None:
@@ -38,6 +39,8 @@ def parse_names(value: str | None) -> set[str] | None:
 
 
 def parse_stages(value: str) -> set[str]:
+    if value == "default":
+        return set(DEFAULT_STAGES)
     if value == "all":
         return set(STAGE_ORDER)
     stages = parse_names(value) or set()
@@ -79,8 +82,11 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Batch experiment YAML")
     parser.add_argument(
         "--stages",
-        default="all",
-        help="all or comma-separated wilor,eef,correct,retarget,visualize,package",
+        default="default",
+        help=(
+            "default (wilor,eef,correct,visualize,package), all, or comma-separated "
+            "wilor,eef,correct,retarget,visualize,package"
+        ),
     )
     parser.add_argument("--episodes", default=None, help="IDs/ranges, e.g. 0,2,5:9")
     parser.add_argument("--variants", default=None, help="Comma-separated run IDs")
@@ -90,6 +96,16 @@ def main() -> None:
         "--force-stage", default=None, help="Comma-separated stages whose matching outputs are regenerated"
     )
     parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument(
+        "--override-experiment",
+        "--override",
+        dest="override_experiment",
+        action="store_true",
+        help=(
+            "replace an existing experiment only when its configuration or source "
+            "dataset fingerprint differs; shared WiLoR caches are preserved"
+        ),
+    )
     parser.add_argument("--visualization-axis-length", type=float, default=0.06)
     parser.add_argument("--visualization-ratio-plot-max", type=float, default=1.5)
     parser.add_argument("--visualization-max-frames", type=int, default=None)
@@ -144,6 +160,7 @@ def main() -> None:
         selected_run_ids=selected_variants,
         force_stages=force_stages,
         fail_fast=args.fail_fast,
+        override_experiment=args.override_experiment,
     )
     runner.run_episode_stages(stages)
     if "visualize" in stages:

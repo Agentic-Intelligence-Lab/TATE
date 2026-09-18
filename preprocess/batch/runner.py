@@ -135,6 +135,44 @@ def _is_complete(record: dict[str, Any] | None, signature: str, paths: Iterable[
     )
 
 
+def _override_incompatible_experiment(
+    experiment_dir: Path,
+    *,
+    config_fingerprint: str,
+    source_dataset_fingerprint: str,
+    enabled: bool,
+) -> None:
+    """Remove only an incompatible experiment directory when explicitly requested.
+
+    WiLoR caches deliberately live outside ``experiment_dir`` and are therefore
+    retained. A missing or malformed manifest is never removed implicitly.
+    """
+
+    manifest_path = experiment_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot inspect existing experiment manifest: {manifest_path}") from error
+    config_changed = existing.get("config_fingerprint") != config_fingerprint
+    dataset_changed = (
+        (existing.get("source_ego_dataset") or {}).get("fingerprint")
+        != source_dataset_fingerprint
+    )
+    if not (config_changed or dataset_changed) or not enabled:
+        return
+    if not experiment_dir.is_dir() or experiment_dir.is_symlink():
+        raise RuntimeError(f"refusing to override non-directory experiment path: {experiment_dir}")
+    reasons = []
+    if config_changed:
+        reasons.append("configuration fingerprint changed")
+    if dataset_changed:
+        reasons.append("source dataset fingerprint changed")
+    print(f"Override experiment {experiment_dir} ({'; '.join(reasons)}); preserving shared WiLoR cache.")
+    shutil.rmtree(experiment_dir)
+
+
 def _eef_summary(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("schema") != "tate.dual_arm_eef" or payload.get("schema_version") != 2:
@@ -189,6 +227,7 @@ class BatchRunner:
         selected_run_ids: set[str] | None = None,
         force_stages: set[str] | None = None,
         fail_fast: bool = False,
+        override_experiment: bool = False,
     ) -> None:
         self.config = config
         self.episodes = episodes
@@ -249,6 +288,12 @@ class BatchRunner:
 
         self.experiment_dir = (
             Path(config["outputs"]["experiment_root"]) / config["experiment_id"]
+        )
+        _override_incompatible_experiment(
+            self.experiment_dir,
+            config_fingerprint=config["config_fingerprint"],
+            source_dataset_fingerprint=source_dataset_fingerprint,
+            enabled=override_experiment,
         )
         self.logs_dir = self.experiment_dir / "logs"
         self.experiment_dir.mkdir(parents=True, exist_ok=True)

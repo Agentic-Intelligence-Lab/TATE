@@ -16,6 +16,8 @@ from preprocess.batch.dataset import (
     video_frame_count,
 )
 from preprocess.batch.lerobot import _package_one_variant, build_episode_table, numeric_stats
+from preprocess.batch.runner import _override_incompatible_experiment
+from preprocess.batch_preprocess import parse_stages
 
 
 def fixed_list(values: np.ndarray) -> pa.Array:
@@ -62,6 +64,52 @@ def eef_payload(valid_left=(True, False), valid_right=(True, True)) -> dict:
 
 
 class BatchPreprocessTest(unittest.TestCase):
+    def test_default_stages_skip_retarget_but_all_includes_it(self):
+        self.assertEqual(
+            parse_stages("default"),
+            {"wilor", "eef", "correct", "visualize", "package"},
+        )
+        self.assertEqual(
+            parse_stages("all"),
+            {"wilor", "eef", "correct", "retarget", "visualize", "package"},
+        )
+
+    def test_override_removes_only_an_incompatible_experiment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment = root / "experiments" / "task"
+            experiment.mkdir(parents=True)
+            (experiment / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "config_fingerprint": "old-config",
+                        "source_ego_dataset": {"fingerprint": "old-dataset"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (experiment / "artifact.txt").write_text("replace me", encoding="utf-8")
+            cache = root / "cache" / "wilor_hands.json"
+            cache.parent.mkdir()
+            cache.write_text("preserve me", encoding="utf-8")
+
+            _override_incompatible_experiment(
+                experiment,
+                config_fingerprint="new-config",
+                source_dataset_fingerprint="new-dataset",
+                enabled=False,
+            )
+            self.assertTrue(experiment.is_dir())
+
+            _override_incompatible_experiment(
+                experiment,
+                config_fingerprint="new-config",
+                source_dataset_fingerprint="new-dataset",
+                enabled=True,
+            )
+            self.assertFalse(experiment.exists())
+            self.assertEqual(cache.read_text(encoding="utf-8"), "preserve me")
+
     def test_discovers_episode_from_lerobot_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

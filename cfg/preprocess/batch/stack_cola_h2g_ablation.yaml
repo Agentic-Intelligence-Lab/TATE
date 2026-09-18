@@ -102,7 +102,7 @@ lerobot:
   enabled: true
   task: "pick two colas and stack them on the brown box"
   video_mode: hardlink
-  replace_state_action: true
+  replace_state_action: false
   action_alignment: same_frame
   gripper_open_raw: -3.4
   gripper_closed_raw: 0.1

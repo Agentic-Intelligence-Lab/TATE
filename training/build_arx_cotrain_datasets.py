@@ -45,6 +45,7 @@ EEF_NAMES = [
     "right_eef_x", "right_eef_y", "right_eef_z", "right_eef_qx", "right_eef_qy", "right_eef_qz", "right_eef_qw", "right_gripper",
 ]
 CANONICAL_ARM = np.asarray([0, 0, 0, 0, 0, 0, 1, 0], dtype=np.float32)
+SIDE_ALIASES = {"l": "left", "left": "left", "r": "right", "right": "right"}
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,7 @@ def link_or_copy(source: Path, destination: Path) -> None:
 
 
 def eef_mask(active_sides: tuple[str, ...]) -> np.ndarray:
+    active_sides = tuple(normalize_side(side) for side in active_sides)
     mask = np.zeros(EEF_DIM, dtype=bool)
     if "left" in active_sides:
         mask[:8] = True
@@ -152,14 +154,27 @@ def eef_mask(active_sides: tuple[str, ...]) -> np.ndarray:
     return mask
 
 
+def normalize_side(side: str) -> str:
+    """Normalize task-config arm names to the serialized LeRobot schema."""
+    try:
+        return SIDE_ALIASES[side.lower()]
+    except KeyError as error:
+        raise ValueError(
+            f"unknown arm side {side!r}; expected one of {sorted(SIDE_ALIASES)}"
+        ) from error
+
+
 def valid_rows(table: pa.Table, source: str, active_sides: tuple[str, ...]) -> np.ndarray:
     """Return t whose state at both t and t+1 is valid; always drops final t."""
     keep = np.ones(len(table) - 1, dtype=bool)
     if source == "ego":
         for side in active_sides:
-            key = f"tate.eef.{side}.valid"
+            key = f"tate.eef.{normalize_side(side)}.valid"
             if key not in table.column_names:
-                raise ValueError(f"ego source is missing {key}")
+                raise ValueError(
+                    f"ego source is missing {key} (available EEF validity columns: "
+                    f"{[name for name in table.column_names if name.startswith('tate.eef.') and name.endswith('.valid')]})"
+                )
             valid = np.asarray(table[key].to_pylist(), dtype=bool)
             keep &= valid[:-1] & valid[1:]
     return keep

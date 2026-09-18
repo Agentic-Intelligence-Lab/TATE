@@ -78,6 +78,7 @@ TASKS = {
     # whose experiment_id is stack_cola_v2_50 and corrected default is pos+rot.
     "stack_cola": TaskSpec("stack_cola", "stack_cola_v2_50", "finger_center_hys085__position_rotation", "pick two colas and stack them on the brown box", ("left", "right")),
     "stack_redcube_v2": TaskSpec("stack_redcube_v2", "stack_redcube_v2_2", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
+    "stack_redcube_v3": TaskSpec("stack_redcube_v3", "stack_redcube_v3", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
 }
 
 

@@ -58,6 +58,8 @@ joint or gripper motion commands. Hardware execution is right-arm-only, defaults
 to an action pacing limit of 5 Hz and one action per inference, and stops after
 five minutes. On the training L20Y, dummy-image inference without Torch
 compilation took 1.09 seconds, so the actual inference rate is lower than 5 Hz.
+The console's gripper threshold defaults to `0.5`: a predicted continuous grasp
+value greater than this value commands closure; otherwise it commands opening.
 Pause, stop, and the existing ARX reset wrapper are available on the page. The hardware
 wrapper takes the shared arm lock and restores the original ARX data and button
 services when the session exits.

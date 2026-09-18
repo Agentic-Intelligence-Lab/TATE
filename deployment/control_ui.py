@@ -83,6 +83,7 @@ class StartRequest(BaseModel):
     checkpoint_path: str = str(DEFAULT_CHECKPOINT_DIR)
     fps: float = Field(default=5.0, ge=1, le=10)
     n_action_steps: int = Field(default=1, ge=1, le=50)
+    gripper_threshold: float = Field(default=0.5, ge=0, le=1)
     start_pose: bool = False
     tcp_offset_m: tuple[float, float, float] = (0.15, 0.0, 0.0)
 
@@ -566,7 +567,11 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
     command = [str(WRAPPER), "--execute"]
     mode = "preparing"
     if req.mode == "execute":
-        command += ["--fps", str(req.fps), "--n-action-steps", str(req.n_action_steps)]
+        command += [
+            "--fps", str(req.fps),
+            "--n-action-steps", str(req.n_action_steps),
+            "--gripper-threshold", str(req.gripper_threshold),
+        ]
         tcp_offset = tuple(float(value) for value in req.tcp_offset_m)
         if not all(math.isfinite(value) for value in tcp_offset) or math.sqrt(sum(value * value for value in tcp_offset)) > 0.30:
             raise HTTPException(400, "TCP offset 必须是有限的三个数，且模长不超过 0.30 m")

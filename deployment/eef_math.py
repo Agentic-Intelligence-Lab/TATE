@@ -64,6 +64,7 @@ def tcp_action_to_flange(
     limits: GuardLimits,
     *,
     tcp_offset_m: np.ndarray | tuple[float, float, float] = TCP_OFFSET_M,
+    gripper_threshold: float = 0.5,
 ) -> tuple[np.ndarray, float]:
     target = np.asarray(action, dtype=np.float64)
     current = np.asarray(current_tcp, dtype=np.float64)
@@ -71,6 +72,8 @@ def tcp_action_to_flange(
         raise ValueError("target and current TCP must have eight finite values")
     if not 0.0 <= target[7] <= 1.0:
         raise ValueError("model gripper action must be in [0, 1]")
+    if not np.isfinite(gripper_threshold) or not 0.0 <= gripper_threshold <= 1.0:
+        raise ValueError("gripper threshold must be in [0, 1]")
     for value, (lower, upper), name in zip(target[:3], (limits.x_range, limits.y_range, limits.z_range), "xyz"):
         if not lower <= value <= upper:
             raise ValueError(f"target TCP {name} outside workspace: {value:.4f}")
@@ -91,7 +94,7 @@ def tcp_action_to_flange(
     flange_xyzrpy = np.asarray([*flange_xyz, *target_rotation.as_euler("xyz")], dtype=np.float64)
     # The policy is trained on binary grasp labels.  Command an endpoint so
     # the gripper supplies holding force even when an object prevents closure.
-    gripper_raw = GRIPPER_CLOSED_RAW if target[7] > 0.5 else GRIPPER_OPEN_RAW
+    gripper_raw = GRIPPER_CLOSED_RAW if target[7] > gripper_threshold else GRIPPER_OPEN_RAW
     return flange_xyzrpy, gripper_raw
 
 

@@ -158,10 +158,16 @@ def infer(policy_url: str, observation: dict, timeout: float) -> tuple[np.ndarra
 
 
 def guarded_target(
-    sdk, action: np.ndarray, feedback: np.ndarray, tcp: np.ndarray, limits: GuardLimits, tcp_offset_m: np.ndarray
+    sdk,
+    action: np.ndarray,
+    feedback: np.ndarray,
+    tcp: np.ndarray,
+    limits: GuardLimits,
+    tcp_offset_m: np.ndarray,
+    gripper_threshold: float,
 ):
     flange, gripper_raw = tcp_action_to_flange(
-        action[8:16], tcp, limits, tcp_offset_m=tcp_offset_m
+        action[8:16], tcp, limits, tcp_offset_m=tcp_offset_m, gripper_threshold=gripper_threshold
     )
     joints = np.asarray(sdk.inverse_kinematics(flange, q_init=feedback[:6], type=2), dtype=np.float64)
     actual = np.asarray(sdk.forward_kinematics(joints, type=2), dtype=np.float64)
@@ -206,6 +212,12 @@ def main() -> int:
     parser.add_argument("--policy-url", default="http://127.0.0.1:8019")
     parser.add_argument("--fps", type=float, default=5.0)
     parser.add_argument("--n-action-steps", type=int, default=1)
+    parser.add_argument(
+        "--gripper-threshold",
+        type=float,
+        default=0.5,
+        help="close the gripper when the predicted continuous value is greater than this threshold",
+    )
     parser.add_argument("--max-policy-latency", type=float, default=5.0)
     parser.add_argument("--max-runtime-seconds", type=int, default=300)
     parser.add_argument(
@@ -220,6 +232,8 @@ def main() -> int:
         parser.error(
             f"fps must be [1, 10] and n-action-steps must be [1, {ACTION_HORIZON}]"
         )
+    if not np.isfinite(args.gripper_threshold) or not 0.0 <= args.gripper_threshold <= 1.0:
+        parser.error("--gripper-threshold must be in [0, 1]")
     tcp_offset_m = np.asarray(TCP_OFFSET_M if args.tcp_offset_m is None else args.tcp_offset_m, dtype=np.float64)
     if not np.isfinite(tcp_offset_m).all() or np.linalg.norm(tcp_offset_m) > 0.30:
         parser.error("--tcp-offset-m must be finite and have magnitude at most 0.30 m")
@@ -274,6 +288,7 @@ def main() -> int:
     arm = None
     limits = GuardLimits()
     print(f"TCP_OFFSET_M {np.array2string(tcp_offset_m, precision=6)}", flush=True)
+    print(f"GRIPPER_THRESHOLD {args.gripper_threshold:.4f}", flush=True)
     try:
         rig = RealSenseRig(width=640, height=480, fps=30)
         rig.start(CAMERA_SERIALS)
@@ -312,7 +327,9 @@ def main() -> int:
         print(f"FIRST_TARGET_TCP {np.array2string(first_target, precision=5)}", flush=True)
         print(f"FIRST_TCP_DELTA_XYZ {np.array2string(delta_xyz, precision=5)} norm_m={np.linalg.norm(delta_xyz):.5f}", flush=True)
         print(f"FIRST_POLICY_LATENCY {latency:.3f}s", flush=True)
-        joints, gripper_raw, flange = guarded_target(sdk, actions[0], feedback, tcp, limits, tcp_offset_m)
+        joints, gripper_raw, flange = guarded_target(
+            sdk, actions[0], feedback, tcp, limits, tcp_offset_m, args.gripper_threshold
+        )
         print(f"FIRST_TARGET_FLANGE {np.array2string(flange, precision=5)}", flush=True)
         print(f"FIRST_TARGET_JOINTS {np.array2string(joints, precision=5)} gripper_raw={gripper_raw:.4f}", flush=True)
         if not wait_for_run(lambda: stop):
@@ -348,7 +365,9 @@ def main() -> int:
                     feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
                     flange = np.asarray(sdk.forward_kinematics(feedback[:6], type=2), dtype=np.float64)
                     tcp = flange_to_tcp_state(flange, float(feedback[6]), tcp_offset_m=tcp_offset_m)
-                    joints, gripper_raw, _ = guarded_target(sdk, action, feedback, tcp, limits, tcp_offset_m)
+                    joints, gripper_raw, _ = guarded_target(
+                        sdk, action, feedback, tcp, limits, tcp_offset_m, args.gripper_threshold
+                    )
                     send_target(arm, joints, gripper_raw)
                     steps += 1
                     if steps % max(1, round(args.fps)) == 0:

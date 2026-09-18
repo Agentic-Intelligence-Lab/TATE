@@ -15,7 +15,8 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -31,6 +32,8 @@ from deployment.constants import CAMERA_SERIALS, DEFAULT_CHECKPOINT_DIR, PREVIEW
 
 TOKEN = secrets.token_urlsafe(24)
 WRAPPER = APP_ROOT / "deployment" / "run_policy.sh"
+POLICY_SCRIPT = APP_ROOT / "deployment" / "serve_policy.py"
+POLICY_URL = "http://127.0.0.1:8019"
 RESET_WRAPPER = Path("/home/qijun/lyt/fold/src/deployment/run_reset_arx_home.sh")
 POLICY_PYTHON = Path(
     os.environ.get("TATE_POLICY_PYTHON", "/home/qijun/models/TATE/openpi/.venv/bin/python")
@@ -84,6 +87,10 @@ class StartRequest(BaseModel):
     tcp_offset_m: tuple[float, float, float] = (0.15, 0.0, 0.0)
 
 
+class CheckpointRequest(BaseModel):
+    checkpoint_path: str = str(DEFAULT_CHECKPOINT_DIR)
+
+
 class ProcessManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -95,6 +102,11 @@ class ProcessManager:
         self.logs: deque[str] = deque(maxlen=300)
         self.smoke_fingerprint: tuple[str, int, int] | None = None
         self.active_checkpoint: Path | None = None
+        self.policy_process: subprocess.Popen[bytes] | None = None
+        self.policy_checkpoint: Path | None = None
+        self.policy_fingerprint: tuple[str, int, int] | None = None
+        self.policy_state = "idle"
+        self.policy_error: str | None = None
 
     def _append(self, value: str) -> None:
         with self.lock:
@@ -118,12 +130,105 @@ class ProcessManager:
                 elif clean.startswith("RUN accepted"):
                     self.mode = "testing"
                     self.last_result = "真机测试运行中"
+                elif clean.startswith("HOLDING_POSITION"):
+                    self.mode = "holding"
+                    self.last_result = "右臂保持在最终位置；可继续测试或复位"
+                elif clean.startswith("RESET_ACCEPTED"):
+                    self.mode = "resetting"
+                    self.last_result = "右臂正在回到零位"
+                elif clean.startswith("HOME_REACHED"):
+                    self.mode = "holding"
+                    self.last_result = "右臂已回到零位并保持；可直接继续测试"
+                elif clean.startswith("RESUMED_FROM_HOLD"):
+                    self.mode = "testing"
+                    self.last_result = "已从最终位置继续测试"
                 elif clean == "PAUSED":
                     self.mode = "paused"
                     self.last_result = "右臂保持当前位置"
                 elif clean == "RESUMED":
                     self.mode = "testing"
                     self.last_result = "已继续推理"
+
+    def _append_policy(self, value: str) -> None:
+        with self.lock:
+            for line in value.replace("\r", "").splitlines():
+                if not line.strip():
+                    continue
+                clean = "POLICY | " + line[-490:]
+                self.logs.append(clean)
+                if "POLICY_READY" in line and self.policy_process is not None:
+                    self.policy_state = "ready"
+                    self.policy_error = None
+
+    def _policy_reader(self, process: subprocess.Popen[bytes]) -> None:
+        assert process.stdout is not None
+        try:
+            for data in iter(process.stdout.readline, b""):
+                self._append_policy(data.decode("utf-8", errors="replace"))
+        finally:
+            code = process.wait()
+            with self.lock:
+                if self.policy_process is process:
+                    if self.policy_state != "stopping":
+                        self.policy_state = "failed"
+                        self.policy_error = f"策略进程退出，状态码 {code}"
+                    self.policy_process = None
+
+    def _stop_policy_locked(self) -> None:
+        process = self.policy_process
+        if process is None:
+            return
+        self.policy_state = "stopping"
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        self.policy_process = None
+        self.policy_checkpoint = None
+        self.policy_fingerprint = None
+
+    def ensure_policy(self, checkpoint_dir: Path) -> dict:
+        fingerprint = model_fingerprint(checkpoint_dir)
+        if fingerprint is None:
+            raise HTTPException(409, "checkpoint 模型文件不存在")
+        with self.lock:
+            if self.process is not None and self.process.poll() is None:
+                raise HTTPException(409, "真机任务运行中，不能切换 checkpoint")
+            if (
+                self.policy_process is not None
+                and self.policy_process.poll() is None
+                and self.policy_fingerprint == fingerprint
+            ):
+                return self.policy_snapshot(checkpoint_dir)
+            self._stop_policy_locked()
+            child_env = os.environ.copy()
+            child_env["TATE_CHECKPOINT_DIR"] = str(checkpoint_dir)
+            process = subprocess.Popen(
+                [str(POLICY_PYTHON), str(POLICY_SCRIPT), "--mode", "serve", "--port", "8019"],
+                cwd=APP_ROOT,
+                env=child_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            self.policy_process = process
+            self.policy_checkpoint = checkpoint_dir
+            self.policy_fingerprint = fingerprint
+            self.policy_state = "loading"
+            self.policy_error = None
+            self.logs.append(f"$ TATE_CHECKPOINT_DIR={checkpoint_dir} {POLICY_PYTHON} {POLICY_SCRIPT} --mode serve --port 8019")
+            threading.Thread(target=self._policy_reader, args=(process,), daemon=True).start()
+            return self.policy_snapshot(checkpoint_dir)
+
+    def policy_snapshot(self, checkpoint_dir: Path) -> dict:
+        with self.lock:
+            matching = self.policy_fingerprint == model_fingerprint(checkpoint_dir)
+            return {
+                "policy_state": self.policy_state if matching else "idle",
+                "policy_loaded": matching and self.policy_state == "ready",
+                "policy_checkpoint": str(self.policy_checkpoint) if matching and self.policy_checkpoint else None,
+                "policy_error": self.policy_error if matching else None,
+            }
 
     def _reader(self, process: subprocess.Popen[bytes], fd: int, started_mode: str, checkpoint_dir: Path | None) -> None:
         try:
@@ -145,10 +250,12 @@ class ProcessManager:
                 if self.process is process:
                     if code == 0 and started_mode == "smoking" and checkpoint_dir is not None and any("SMOKE_INFERENCE_OK" in x for x in self.logs):
                         self.smoke_fingerprint = model_fingerprint(checkpoint_dir)
-                    if code == 0:
+                    if code == 0 and self.mode == "resetting":
+                        self.last_result = "右臂已回到零位，控制服务已恢复"
+                    elif code == 0:
                         self.last_result = "检查或测试已完成"
                     elif self.mode == "stopping":
-                        self.last_result = "任务已停止，保护模式与原服务正在恢复"
+                        self.last_result = "任务已停止，原控制服务正在恢复"
                     else:
                         self.last_result = f"进程退出，状态码 {code}"
                     self.mode = "idle"
@@ -237,11 +344,38 @@ class ProcessManager:
                 self.last_result = "当前没有运行中的任务"
                 return
             self.mode = "stopping"
-            self.last_result = "正在停止并恢复原控制服务"
+            self.last_result = "正在停止，右臂将保持最终位置"
             try:
-                os.killpg(process.pid, signal.SIGINT)
+                robot_pid = self._robot_pid(process.pid)
+                if robot_pid is None:
+                    os.killpg(process.pid, signal.SIGINT)
+                else:
+                    os.kill(robot_pid, signal.SIGUSR2)
             except ProcessLookupError:
                 pass
+
+    def resume(self) -> bool:
+        with self.lock:
+            if self.mode != "holding" or self.process is None or self.process.poll() is not None:
+                return False
+            robot_pid = self._robot_pid(self.process.pid)
+            if robot_pid is None:
+                raise HTTPException(409, "机器人保持进程未就绪")
+            os.kill(robot_pid, signal.SIGCONT)
+            self.last_result = "正在从最终位置继续测试"
+            return True
+
+    def reset_held_robot(self) -> bool:
+        with self.lock:
+            if self.mode != "holding" or self.process is None or self.process.poll() is not None:
+                return False
+            robot_pid = self._robot_pid(self.process.pid)
+            if robot_pid is None:
+                raise HTTPException(409, "机器人保持进程未就绪")
+            os.kill(robot_pid, signal.SIGHUP)
+            self.mode = "resetting"
+            self.last_result = "已请求右臂回到零位"
+            return True
 
     def snapshot(self, checkpoint_dir: Path = DEFAULT_CHECKPOINT_DIR) -> dict:
         with self.lock:
@@ -255,7 +389,13 @@ class ProcessManager:
                 "result": self.last_result,
                 "smoke_ready": self.smoke_fingerprint is not None and self.smoke_fingerprint == model_fingerprint(checkpoint_dir),
                 "logs": list(self.logs),
+                **self.policy_snapshot(checkpoint_dir),
             }
+
+    def shutdown(self) -> None:
+        self.stop()
+        with self.lock:
+            self._stop_policy_locked()
 
 
 class IdleCameraRelay:
@@ -341,7 +481,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        manager.stop()
+        manager.shutdown()
         camera_relay.stop()
         for _ in range(50):
             if not manager.snapshot()["running"]:
@@ -370,7 +510,19 @@ def checkpoint(checkpoint_path: str | None = None) -> dict:
         **checkpoint_status(selected),
         "policy_python_present": POLICY_PYTHON.is_file() and POLICY_READY_MARKER.is_file(),
         "partial_bytes": partial.stat().st_size if partial.is_file() else None,
+        **manager.policy_snapshot(selected),
     }
+
+
+@app.post("/api/load-policy")
+def load_policy(req: CheckpointRequest, x_control_token: str | None = Header(default=None)) -> dict:
+    authorize(x_control_token)
+    selected = selected_checkpoint(req.checkpoint_path)
+    if not checkpoint_status(selected)["ready"]:
+        raise HTTPException(409, "模型权重、归一化文件或 tokenizer 尚未齐全")
+    if not POLICY_PYTHON.is_file() or not POLICY_READY_MARKER.is_file():
+        raise HTTPException(409, "OpenPI 推理环境尚未安装")
+    return manager.ensure_policy(selected)
 
 
 @app.get("/api/status")
@@ -395,8 +547,24 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
         raise HTTPException(409, "模型权重、归一化文件或 tokenizer 尚未齐全")
     if not POLICY_PYTHON.is_file() or not POLICY_READY_MARKER.is_file():
         raise HTTPException(409, "OpenPI 推理环境尚未安装")
-    command = [str(WRAPPER), {"check": "--check", "smoke": "--smoke", "execute": "--execute"}[req.mode]]
-    mode = {"check": "checking", "smoke": "smoking", "execute": "preparing"}[req.mode]
+    policy = manager.policy_snapshot(selected)
+    if req.mode == "check":
+        return manager.ensure_policy(selected)
+    if not policy["policy_loaded"]:
+        raise HTTPException(409, "请先点击“确认并加载 checkpoint”，等待权重加载完成")
+    if req.mode == "smoke":
+        try:
+            request = Request(POLICY_URL + "/smoke", data=b"{}", method="POST")
+            with urlopen(request, timeout=20) as response:
+                result = response.read().decode("utf-8")
+        except (OSError, URLError) as exc:
+            raise HTTPException(503, f"策略服务不可用: {exc}") from exc
+        manager.logs.append(f"SMOKE_INFERENCE_OK {result}")
+        return {"ok": True, **manager.policy_snapshot(selected)}
+    if manager.resume():
+        return {"ok": True, "mode": "testing"}
+    command = [str(WRAPPER), "--execute"]
+    mode = "preparing"
     if req.mode == "execute":
         command += ["--fps", str(req.fps), "--n-action-steps", str(req.n_action_steps)]
         tcp_offset = tuple(float(value) for value in req.tcp_offset_m)
@@ -440,6 +608,8 @@ def stop(x_control_token: str | None = Header(default=None)) -> dict:
 @app.post("/api/reset")
 def reset(x_control_token: str | None = Header(default=None)) -> dict:
     authorize(x_control_token)
+    if manager.reset_held_robot():
+        return {"ok": True, "mode": "resetting"}
     if not RESET_WRAPPER.is_file():
         raise HTTPException(409, "ARX 复位脚本不存在")
     if fold_task_active():

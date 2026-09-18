@@ -106,7 +106,7 @@ def infer(policy, payload: dict) -> dict:
     }
 
 
-def smoke_inference(policy) -> None:
+def smoke_result(policy) -> dict:
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
     state = np.asarray([0, 0, 0, 0, 0, 0, 1, 0, 0.25, 0.13, -0.08, 0, 0, 0, 1, 0.7], dtype=np.float32)
     observation = {
@@ -119,7 +119,12 @@ def smoke_inference(policy) -> None:
     actions = np.asarray(result["actions"], dtype=np.float32)
     if actions.shape != (ACTION_HORIZON, 16) or not np.isfinite(actions).all():
         raise RuntimeError(f"smoke inference returned invalid actions: {actions.shape}")
-    print(f"SMOKE_INFERENCE_OK shape={actions.shape} infer_ms={result['policy_timing']['infer_ms']:.1f}", flush=True)
+    return {"shape": list(actions.shape), "infer_ms": float(result["policy_timing"]["infer_ms"])}
+
+
+def smoke_inference(policy) -> None:
+    result = smoke_result(policy)
+    print(f"SMOKE_INFERENCE_OK shape={tuple(result['shape'])} infer_ms={result['infer_ms']:.1f}", flush=True)
 
 
 def serve(policy, port: int) -> None:
@@ -139,16 +144,19 @@ def serve(policy, port: int) -> None:
                 self._json(404, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path != "/infer":
+            if self.path not in {"/infer", "/smoke"}:
                 self._json(404, {"error": "not found"})
                 return
             size = int(self.headers.get("Content-Length", "0"))
-            if size < 1 or size > 4_000_000:
+            if self.path == "/infer" and (size < 1 or size > 4_000_000):
                 self._json(413, {"error": "invalid observation size"})
                 return
             try:
-                payload = json.loads(self.rfile.read(size))
-                self._json(200, infer(policy, payload))
+                if self.path == "/smoke":
+                    self._json(200, smoke_result(policy))
+                else:
+                    payload = json.loads(self.rfile.read(size))
+                    self._json(200, infer(policy, payload))
             except Exception as exc:
                 self._json(400, {"error": str(exc)})
 

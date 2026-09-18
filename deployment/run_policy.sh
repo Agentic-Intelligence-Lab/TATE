@@ -1,32 +1,21 @@
 #!/usr/bin/env bash
-# Launch OpenPI offline checks or one guarded ARX right-arm session.
+# Launch one guarded ARX right-arm session against the already-loaded policy.
 set -euo pipefail
 
-APP_ROOT=${TATE_APP_ROOT:-/home/qijun/models/TATE/app}
-POLICY_PYTHON=${TATE_POLICY_PYTHON:-/home/qijun/models/TATE/openpi/.venv/bin/python}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+DEFAULT_APP_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+APP_ROOT=${TATE_APP_ROOT:-$DEFAULT_APP_ROOT}
 ROBOT_PYTHON=${TATE_ROBOT_PYTHON:-/home/qijun/ARX5_beta/.venv/bin/python}
-POLICY_SCRIPT="$APP_ROOT/deployment/serve_policy.py"
 ROBOT_SCRIPT="$APP_ROOT/deployment/robot_runner.py"
 POLICY_PORT=8019
 mode=${1:-}
 shift || true
 
-if [[ ! -x "$POLICY_PYTHON" ]]; then
-  echo "OpenPI Python environment missing: $POLICY_PYTHON" >&2
-  exit 2
-fi
-
 case "$mode" in
-  --check)
-    exec "$POLICY_PYTHON" "$POLICY_SCRIPT" --mode load-only
-    ;;
-  --smoke)
-    exec "$POLICY_PYTHON" "$POLICY_SCRIPT" --mode smoke
-    ;;
   --execute)
     ;;
   *)
-    echo "usage: $0 --check | --smoke | --execute [robot-runner options]" >&2
+    echo "usage: $0 --execute [robot-runner options]" >&2
     exit 2
     ;;
 esac
@@ -45,14 +34,7 @@ data_was_active=false
 button_was_active=false
 systemctl --user is-active --quiet arx-data-station.service && data_was_active=true
 systemctl --user is-active --quiet arx-button-control.service && button_was_active=true
-policy_pid=
-policy_log=$(mktemp /tmp/tate_arx_policy.XXXXXX.log)
-
 cleanup() {
-  if [[ -n "$policy_pid" ]]; then
-    kill "$policy_pid" 2>/dev/null || true
-    wait "$policy_pid" 2>/dev/null || true
-  fi
   echo "Restoring original ARX services"
   if [[ "$data_was_active" == true ]]; then
     systemctl --user start arx-data-station.service || true
@@ -60,7 +42,6 @@ cleanup() {
   if [[ "$button_was_active" == true ]]; then
     systemctl --user start arx-button-control.service || true
   fi
-  rm -f "$policy_log"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -98,28 +79,14 @@ fi
 systemctl --user stop arx-data-station.service
 sleep 2
 
-echo "Loading OpenPI checkpoint; this can take several minutes"
-"$POLICY_PYTHON" "$POLICY_SCRIPT" --mode serve --port "$POLICY_PORT" >"$policy_log" 2>&1 &
-policy_pid=$!
-ready=false
-for attempt in $(seq 1 240); do
-  if curl -fsS --max-time 1 "http://127.0.0.1:$POLICY_PORT/healthz" >/dev/null 2>&1; then
-    ready=true
-    break
-  fi
-  if ! kill -0 "$policy_pid" 2>/dev/null; then
-    break
-  fi
-  if (( attempt % 15 == 0 )); then
-    echo "Still loading OpenPI checkpoint (${attempt}s)"
-  fi
-  sleep 1
-done
-if [[ "$ready" != true ]]; then
-  echo "OpenPI policy server failed to start" >&2
-  tail -30 "$policy_log" >&2
+if ! curl -fsS --max-time 1 "http://127.0.0.1:$POLICY_PORT/healthz" >/dev/null; then
+  echo "OpenPI policy server is not ready; confirm and load the checkpoint in the 8089 console first" >&2
   exit 4
 fi
-echo "OpenPI policy server ready on 127.0.0.1:$POLICY_PORT"
+echo "Reusing OpenPI policy server on 127.0.0.1:$POLICY_PORT"
 
-"$ROBOT_PYTHON" "$ROBOT_SCRIPT" --execute --policy-url "http://127.0.0.1:$POLICY_PORT" "$@"
+if "$ROBOT_PYTHON" "$ROBOT_SCRIPT" --execute --policy-url "http://127.0.0.1:$POLICY_PORT" "$@"; then
+  exit 0
+else
+  exit $?
+fi

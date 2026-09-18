@@ -2,10 +2,12 @@
 # Build an isolated OpenPI inference environment from the training checkout's uv.lock.
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+DEFAULT_APP_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 OPENPI_ROOT=${TATE_OPENPI_ROOT:-/home/qijun/models/TATE/openpi}
-APP_ROOT=${TATE_APP_ROOT:-/home/qijun/models/TATE/app}
+APP_ROOT=${TATE_APP_ROOT:-$DEFAULT_APP_ROOT}
 SDK_PYTHON=${TATE_ROBOT_PYTHON:-/home/qijun/ARX5_beta/.venv/bin/python}
-BOOTSTRAP_DIR=${TATE_UV_BOOTSTRAP:-/home/qijun/models/TATE/uv-bootstrap}
+BOOTSTRAP_DIR=${TATE_UV_BOOTSTRAP:-$APP_ROOT/.uv-bootstrap}
 INFER_PYTHON=${TATE_OPENPI_PYTHON:-3.11}
 
 if [[ ! -f "$OPENPI_ROOT/pyproject.toml" || ! -f "$OPENPI_ROOT/uv.lock" ]]; then
@@ -30,6 +32,7 @@ rm -f "$OPENPI_ROOT/.venv/.tate_inference_ready"
 TRANSFORMERS_SITE=$("$OPENPI_ROOT/.venv/bin/python" -c 'from pathlib import Path; import transformers; print(Path(transformers.__file__).parent)')
 cp -a "$OPENPI_ROOT/src/openpi/models_pytorch/transformers_replace/." "$TRANSFORMERS_SITE/"
 
+mkdir -p "$APP_ROOT/thirdparty"
 ln -sfn "$OPENPI_ROOT" "$APP_ROOT/thirdparty/openpi"
 "$OPENPI_ROOT/.venv/bin/python" -c 'import torch, openpi; from transformers.models.siglip import check; assert check.check_whether_transformers_replace_is_installed_correctly(); print("OpenPI ready: torch", torch.__version__, "CUDA available", torch.cuda.is_available())'
 touch "$OPENPI_ROOT/.venv/.tate_inference_ready"

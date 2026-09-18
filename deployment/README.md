@@ -27,16 +27,28 @@ The PaliGemma tokenizer under `/home/qijun/.cache/openpi/big_vision/` is already
 on the ARX host.
 An incomplete `model.safetensors.partial` does not count as the model.
 
-The OpenPI checkout deployed to `/home/qijun/models/TATE/openpi` is the training
-checkout at revision `215abfb217dbac7d5f1273282331b9b1866c0479`, together
-with its training `pyproject.toml` and `uv.lock`. Install its isolated inference
-environment with Python 3.11, matching training, without changing the ARX SDK
-environment:
+The deployment scripts use the repository containing them as `TATE_APP_ROOT` by
+default. After cloning TATE to `/home/qijun/TATE`, start the page directly with:
 
 ```bash
-ssh qijun@192.168.2.136 \
-  '/home/qijun/models/TATE/app/deployment/install_openpi_env.sh'
+cd /home/qijun/TATE
+./deployment/run_ui.sh
 ```
+
+The existing OpenPI checkout remains at `/home/qijun/models/TATE/openpi`. It is
+separate from the TATE repository and can be reused after cloning. To install or
+refresh its isolated inference environment with Python 3.11, matching training,
+without changing the ARX SDK environment:
+
+```bash
+cd /home/qijun/TATE
+TATE_OPENPI_ROOT=/home/qijun/models/TATE/openpi \
+  ./deployment/install_openpi_env.sh
+```
+
+For a persistent user service, copy `deployment/tate-arx-ui.service` to
+`~/.config/systemd/user/`. Its default checkout location is `%h/TATE`, namely
+`/home/qijun/TATE` for user `qijun`.
 
 The model-load and dummy-image inference buttons are optional. Preparing a real
 session loads the model, observes the live cameras and right-arm state, and

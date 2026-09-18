@@ -21,17 +21,17 @@
 <body><main>
   <div class="title"><div><h1>TATE · Stack Cube</h1><div class="muted">ARX 右臂 EEF Pi0.5 控制台</div></div><div class="badge">SSH 本地访问 · 8089</div></div>
   <section class="card"><h2>Checkpoint</h2>
-    <div class="checkpoint-row"><div><label for="checkpoint-path">ARX 主机上的 checkpoint 目录</label><input id="checkpoint-path" type="text" spellcheck="false" value="/home/qijun/models/TATE/openpi_checkpoints/arx_eef/stack_cube_cotrain_camdrop_pi05_bs16/2857"></div><button id="refresh-path" onclick="refreshSelectedPath()">检查此路径</button></div>
+    <div class="checkpoint-row"><div><label for="checkpoint-path">ARX 主机上的 checkpoint 目录</label><input id="checkpoint-path" type="text" spellcheck="false" value="/home/qijun/models/TATE/openpi_checkpoints/arx_eef/stack_cube_cotrain_camdrop_pi05_bs16/2857"></div><button id="refresh-path" onclick="refreshSelectedPath()">确认并加载</button></div>
     <div id="checkpoint-state" class="state"><span class="dot"></span><span>检查中…</span></div><div id="checkpoint-detail" class="muted"></div>
   </section>
   <section class="card"><h2>运行</h2>
-    <div class="grid"><div><label>动作下发上限（Hz）</label><input id="fps" type="number" min="1" max="10" step="1" value="5"></div><div><label>每次推理执行步数（1–10）</label><input id="steps" type="number" min="1" max="10" step="1" value="1"></div><div><label>当前状态</label><div id="run-state" class="state">空闲</div></div></div>
+    <div class="grid"><div><label>动作下发上限（Hz）</label><input id="fps" type="number" min="1" max="10" step="1" value="5"></div><div><label>每次推理执行步数（1–50）</label><input id="steps" type="number" min="1" max="50" step="1" value="1"></div><div><label>当前状态</label><div id="run-state" class="state">空闲</div></div></div>
     <div class="tcp-row"><div><label for="tcp-x">TCP offset X（m）</label><input id="tcp-x" type="number" step="0.0001" value="0.15"></div><div><label for="tcp-y">TCP offset Y（m）</label><input id="tcp-y" type="number" step="0.0001" value="0"></div><div><label for="tcp-z">TCP offset Z（m）</label><input id="tcp-z" type="number" step="0.0001" value="0"></div></div>
     <p class="muted tcp-help">Flange → TCP。新数据/新 checkpoint 使用 <code>[0.15, 0, 0]</code>；旧 checkpoint 使用 <code>[0.105, 0.0018, -0.0063]</code>。该值同时用于真机观测和 action 的 IK 解码。</p>
     <div class="start-row"><label><input id="start-pose" type="checkbox" checked>先移动右臂到真实 stack-cube 数据 episode 0 的第 60 帧（约 15 秒缓慢移动）</label></div>
-    <div class="controls"><button id="check" onclick="startTask('check')">检查模型加载</button><button id="smoke" onclick="startTask('smoke')">假数据推理</button><button id="prepare" class="primary" onclick="startTask('execute')">准备真机测试</button><button id="move" class="confirm" onclick="confirmMove()">确认 MOVE</button><button id="confirm" class="confirm" onclick="confirmRun()">确认 RUN</button></div>
+    <div class="controls"><button id="check" onclick="startTask('check')">确认并加载 checkpoint</button><button id="smoke" onclick="startTask('smoke')">假数据推理</button><button id="prepare" class="primary" onclick="startTask('execute')">准备真机测试</button><button id="move" class="confirm" onclick="confirmMove()">确认 MOVE</button><button id="confirm" class="confirm" onclick="confirmRun()">确认 RUN</button></div>
     <div class="controls second"><button id="pause" onclick="postAction('pause')">暂停 / 继续</button><button id="stop" class="danger" onclick="postAction('stop')">结束测试</button><button id="reset" onclick="postAction('reset')">复位</button></div>
-    <p class="notice">勾选起点后，“准备真机测试”会先检查并显示第 60 帧关节目标；检查现场无障碍后点击“确认 MOVE”，右臂缓慢到位，再读取三路相机与右臂状态、推理首个目标。点击“确认 RUN”后会重新观测并推理，下发的动作可能与预览不同。策略动作不再限制单步位移、旋转、关节或夹爪变化；仍检查目标范围、关节硬限位与 IK/FK 有效性。可随时点击“结束测试”。</p>
+    <p class="notice">输入路径后点击“确认并加载”，权重会常驻 GPU 并被后续测试复用。勾选起点后，“准备真机测试”会先检查并显示第 60 帧关节目标；检查现场无障碍后点击“确认 MOVE”，右臂缓慢到位。点击“结束测试”会保持右臂在最终位置；再次点击“准备真机测试”会直接继续该会话。点击“复位”会回到零位并保持同一机器人、相机和策略会话。</p>
   </section>
   <section class="card"><h2>策略摄像头输入</h2><div class="cameras">
     <figure class="camera"><figcaption>HEAD · 409122273248</figcaption><img src="/camera/head" alt="头部相机"></figure>
@@ -46,18 +46,19 @@
   const pathInput=document.getElementById('checkpoint-path');
   try{const saved=localStorage.getItem('tate-checkpoint-path');if(saved)pathInput.value=saved}catch(e){}
   pathInput.addEventListener('keydown',e=>{if(e.key==='Enter')refreshSelectedPath()});
-  let checkpointReady=false,policyReady=false,running=false,mode='idle';
-  const modeLabels={idle:'空闲',checking:'检查模型',smoking:'假数据推理',preparing:'准备真机',awaiting_start_pose:'等待 MOVE',moving_start_pose:'移动到起点',awaiting_confirmation:'等待 RUN',testing:'真机运行',paused:'已暂停',stopping:'正在结束',resetting:'复位中'};
+  let checkpointReady=false,policyReady=false,policyLoaded=false,running=false,mode='idle';
+  const modeLabels={idle:'空闲',checking:'检查模型',smoking:'假数据推理',preparing:'准备真机',awaiting_start_pose:'等待 MOVE',moving_start_pose:'移动到起点',awaiting_confirmation:'等待 RUN',testing:'真机运行',paused:'已暂停',stopping:'正在结束',holding:'保持最终位置',resetting:'复位中'};
   function chosenPath(){return pathInput.value.trim()}
   async function api(path,options={}){const r=await fetch(path,options);const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||'请求失败');return j}
-  function updateButtons(){const available=checkpointReady&&policyReady&&!running;for(const id of ['check','smoke','prepare'])document.getElementById(id).disabled=!available;document.getElementById('move').disabled=mode!=='awaiting_start_pose';document.getElementById('confirm').disabled=mode!=='awaiting_confirmation';document.getElementById('pause').disabled=!['testing','paused'].includes(mode);document.getElementById('stop').disabled=!running;document.getElementById('reset').disabled=running;pathInput.disabled=running;document.getElementById('refresh-path').disabled=running;document.getElementById('start-pose').disabled=running;for(const id of ['tcp-x','tcp-y','tcp-z'])document.getElementById(id).disabled=running}
+  function updateButtons(){const held=mode==='holding',loadable=checkpointReady&&policyReady&&!running,available=loadable&&policyLoaded;document.getElementById('check').disabled=!loadable;document.getElementById('smoke').disabled=!available;document.getElementById('prepare').disabled=!(available||held);document.getElementById('move').disabled=mode!=='awaiting_start_pose';document.getElementById('confirm').disabled=mode!=='awaiting_confirmation';document.getElementById('pause').disabled=!['testing','paused'].includes(mode);document.getElementById('stop').disabled=!['testing','paused','preparing','awaiting_start_pose','awaiting_confirmation'].includes(mode);document.getElementById('reset').disabled=running&&!held;pathInput.disabled=running;document.getElementById('refresh-path').disabled=running;document.getElementById('start-pose').disabled=running;for(const id of ['tcp-x','tcp-y','tcp-z'])document.getElementById(id).disabled=running}
   async function refreshCheckpoint(){
     const path=chosenPath(),box=document.getElementById('checkpoint-state'),detail=document.getElementById('checkpoint-detail');
     try{
       const x=await api('/api/checkpoint?checkpoint_path='+encodeURIComponent(path));if(path!==chosenPath())return;
-      checkpointReady=x.ready;policyReady=x.policy_python_present;box.className='state '+(x.ready&&policyReady?'ready':'error');
-      box.querySelector('span:last-child').textContent=x.ready&&policyReady?'模型与环境已就绪':x.ready?'模型齐全，推理环境待安装':'Checkpoint 未就绪';
+      checkpointReady=x.ready;policyReady=x.policy_python_present;policyLoaded=x.policy_loaded;box.className='state '+(x.ready&&policyReady&&x.policy_loaded?'ready':x.ready&&policyReady?'':'error');
+      box.querySelector('span:last-child').textContent=x.ready&&policyReady?(x.policy_loaded?'权重已加载，可开始测试':x.policy_state==='loading'?'正在加载权重…':'模型齐全，等待确认加载'):'Checkpoint 未就绪';
       const parts=['模型 '+(x.model_present?`${(x.model_bytes/1e9).toFixed(2)} GB · ${x.model_complete?'文件完整':'文件不完整'}`:'未找到 model.safetensors'),'归一化 '+(x.norm_stats_present?'已就绪':'缺失'),'tokenizer '+(x.tokenizer_present?'已就绪':'缺失')];
+      if(x.policy_error)parts.push('加载错误 '+x.policy_error);
       if(x.partial_bytes)parts.push(`部分传输文件 ${(x.partial_bytes/1e9).toFixed(2)} GB`);detail.textContent=parts.join(' · ');
     }catch(e){if(path!==chosenPath())return;checkpointReady=false;box.className='state error';box.querySelector('span:last-child').textContent='路径不可用';detail.textContent=e.message}
     updateButtons();
@@ -70,9 +71,10 @@
       const logs=document.getElementById('logs'),bottom=logs.scrollHeight-logs.scrollTop-logs.clientHeight<50;logs.textContent=x.logs.join('\n')||'等待任务…';if(bottom)logs.scrollTop=logs.scrollHeight;updateButtons();
     }catch(e){}
   }
-  function refreshSelectedPath(){try{localStorage.setItem('tate-checkpoint-path',chosenPath())}catch(e){}checkpointReady=false;updateButtons();refreshCheckpoint();refreshStatus()}
+  async function loadSelectedPolicy(){try{await api('/api/load-policy',{method:'POST',headers,body:JSON.stringify({checkpoint_path:chosenPath()})});refreshCheckpoint();refreshStatus()}catch(e){alert(e.message)}}
+  function refreshSelectedPath(){try{localStorage.setItem('tate-checkpoint-path',chosenPath())}catch(e){}checkpointReady=false;policyLoaded=false;updateButtons();loadSelectedPolicy()}
   async function startTask(kind){
-    try{const fps=Number(document.getElementById('fps').value),steps=Number(document.getElementById('steps').value),tcp_offset_m=['tcp-x','tcp-y','tcp-z'].map(id=>Number(document.getElementById(id).value));if(!Number.isFinite(fps)||fps<1||fps>10||!Number.isInteger(steps)||steps<1||steps>10)throw new Error('频率需为 1–10 Hz，执行步数需为 1–10');if(tcp_offset_m.some(x=>!Number.isFinite(x))||Math.hypot(...tcp_offset_m)>.30)throw new Error('TCP offset 必须是有限的三个数，且模长不超过 0.30 m');await api('/api/start',{method:'POST',headers,body:JSON.stringify({mode:kind,checkpoint_path:chosenPath(),fps,n_action_steps:steps,start_pose:document.getElementById('start-pose').checked,tcp_offset_m})});running=true;updateButtons();refreshStatus()}catch(e){alert(e.message)}
+    try{const fps=Number(document.getElementById('fps').value),steps=Number(document.getElementById('steps').value),tcp_offset_m=['tcp-x','tcp-y','tcp-z'].map(id=>Number(document.getElementById(id).value));if(!Number.isFinite(fps)||fps<1||fps>10||!Number.isInteger(steps)||steps<1||steps>50)throw new Error('频率需为 1–10 Hz，执行步数需为 1–50');if(tcp_offset_m.some(x=>!Number.isFinite(x))||Math.hypot(...tcp_offset_m)>.30)throw new Error('TCP offset 必须是有限的三个数，且模长不超过 0.30 m');await api('/api/start',{method:'POST',headers,body:JSON.stringify({mode:kind,checkpoint_path:chosenPath(),fps,n_action_steps:steps,start_pose:document.getElementById('start-pose').checked,tcp_offset_m})});if(kind==='check'||kind==='smoke'){refreshCheckpoint();refreshStatus();return}running=true;updateButtons();refreshStatus()}catch(e){alert(e.message)}
   }
   async function confirmMove(){try{await api('/api/confirm-start-pose',{method:'POST',headers});refreshStatus()}catch(e){alert(e.message)}}
   async function confirmRun(){try{await api('/api/confirm',{method:'POST',headers});refreshStatus()}catch(e){alert(e.message)}}

@@ -4,9 +4,11 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/qijun/models/TATE/app
-Environment=TATE_APP_ROOT=/home/qijun/models/TATE/app
-ExecStart=/home/qijun/models/TATE/app/deployment/run_ui.sh
+# Default clone location: /home/qijun/TATE.  Override TATE_APP_ROOT only when
+# installing a customized unit for another checkout location.
+WorkingDirectory=%h/TATE
+Environment=TATE_APP_ROOT=%h/TATE
+ExecStart=%h/TATE/deployment/run_ui.sh
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20

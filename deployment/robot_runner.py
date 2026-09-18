@@ -232,6 +232,10 @@ def main() -> int:
 
     stop = False
     pause_toggle = False
+    hold_requested = False
+    reset_requested = False
+    resume_requested = False
+    normal_completion = False
 
     def request_stop(_signal, _frame):
         nonlocal stop
@@ -241,9 +245,25 @@ def main() -> int:
         nonlocal pause_toggle
         pause_toggle = True
 
+    def request_hold(_signal, _frame):
+        nonlocal stop, hold_requested
+        hold_requested = True
+        stop = True
+
+    def request_reset(_signal, _frame):
+        nonlocal reset_requested
+        reset_requested = True
+
+    def request_resume(_signal, _frame):
+        nonlocal resume_requested
+        resume_requested = True
+
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGUSR1, request_pause)
+    signal.signal(signal.SIGUSR2, request_hold)
+    signal.signal(signal.SIGHUP, request_reset)
+    signal.signal(signal.SIGCONT, request_resume)
 
     sys.path.insert(0, str(SDK_ROOT))
     import bimanual as sdk
@@ -301,46 +321,80 @@ def main() -> int:
 
         print("RUN accepted; using a fresh observation before the first command", flush=True)
         period = 1.0 / args.fps
-        started = time.monotonic()
         paused = False
         steps = 0
-        while not stop and time.monotonic() - started < args.max_runtime_seconds:
-            if pause_toggle:
-                pause_toggle = False
-                paused = not paused
-                print("PAUSED" if paused else "RESUMED", flush=True)
-            if paused:
-                feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
-                send_target(arm, feedback[:6], float(np.clip(feedback[6], -3.4, 0.1)))
-                time.sleep(period)
-                continue
-            observation, feedback, tcp = read_observation(arm, rig, sdk, tcp_offset_m)
-            actions, latency = infer(args.policy_url, observation, args.max_policy_latency + 1)
-            if latency > args.max_policy_latency:
-                raise RuntimeError(f"policy latency {latency:.2f}s exceeds watchdog")
-            if stop or pause_toggle:
-                continue
-            for action in actions[: args.n_action_steps]:
+        while True:
+            started = time.monotonic()
+            while not stop and time.monotonic() - started < args.max_runtime_seconds:
+                if pause_toggle:
+                    pause_toggle = False
+                    paused = not paused
+                    print("PAUSED" if paused else "RESUMED", flush=True)
+                if paused:
+                    feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
+                    send_target(arm, feedback[:6], float(np.clip(feedback[6], -3.4, 0.1)))
+                    time.sleep(period)
+                    continue
+                observation, feedback, tcp = read_observation(arm, rig, sdk, tcp_offset_m)
+                actions, latency = infer(args.policy_url, observation, args.max_policy_latency + 1)
+                if latency > args.max_policy_latency:
+                    raise RuntimeError(f"policy latency {latency:.2f}s exceeds watchdog")
                 if stop or pause_toggle:
-                    break
-                tick = time.monotonic()
+                    continue
+                for action in actions[: args.n_action_steps]:
+                    if stop or pause_toggle:
+                        break
+                    tick = time.monotonic()
+                    feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
+                    flange = np.asarray(sdk.forward_kinematics(feedback[:6], type=2), dtype=np.float64)
+                    tcp = flange_to_tcp_state(flange, float(feedback[6]), tcp_offset_m=tcp_offset_m)
+                    joints, gripper_raw, _ = guarded_target(sdk, action, feedback, tcp, limits, tcp_offset_m)
+                    send_target(arm, joints, gripper_raw)
+                    steps += 1
+                    if steps % max(1, round(args.fps)) == 0:
+                        print(f"step={steps} policy_latency={latency:.3f}s right_tcp={np.array2string(tcp, precision=4)}", flush=True)
+                    time.sleep(max(0.0, period - (time.monotonic() - tick)))
+            if not hold_requested:
+                print(f"TEST_FINISHED steps={steps}", flush=True)
+                return 0
+
+            feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
+            if feedback.shape != (7,) or not np.isfinite(feedback).all():
+                raise RuntimeError("invalid feedback while entering position hold")
+            hold_joints, hold_gripper = feedback[:6].copy(), float(np.clip(feedback[6], -3.4, 0.1))
+            print(f"HOLDING_POSITION joints={np.array2string(hold_joints, precision=5)} gripper_raw={hold_gripper:.5f}", flush=True)
+            while not reset_requested and not resume_requested:
+                send_target(arm, hold_joints, hold_gripper)
+                time.sleep(0.2)
+            if reset_requested:
+                print("RESET_ACCEPTED: returning right arm to home", flush=True)
+                if not arm.go_home(5.0, wait=True):
+                    raise RuntimeError("right-arm go_home failed")
+                reset_requested = False
                 feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
-                flange = np.asarray(sdk.forward_kinematics(feedback[:6], type=2), dtype=np.float64)
-                tcp = flange_to_tcp_state(flange, float(feedback[6]), tcp_offset_m=tcp_offset_m)
-                joints, gripper_raw, _ = guarded_target(sdk, action, feedback, tcp, limits, tcp_offset_m)
-                send_target(arm, joints, gripper_raw)
-                steps += 1
-                if steps % max(1, round(args.fps)) == 0:
-                    print(f"step={steps} policy_latency={latency:.3f}s right_tcp={np.array2string(tcp, precision=4)}", flush=True)
-                time.sleep(max(0.0, period - (time.monotonic() - tick)))
-        print(f"TEST_FINISHED steps={steps}", flush=True)
-        return 0
+                if feedback.shape != (7,) or not np.isfinite(feedback).all():
+                    raise RuntimeError("invalid feedback after homing")
+                hold_joints, hold_gripper = feedback[:6].copy(), float(np.clip(feedback[6], -3.4, 0.1))
+                print(
+                    f"HOME_REACHED: holding joints={np.array2string(hold_joints, precision=5)} "
+                    f"gripper_raw={hold_gripper:.5f}",
+                    flush=True,
+                )
+                hold_requested = True
+                stop = True
+                continue
+            resume_requested = False
+            hold_requested = False
+            stop = False
+            paused = False
+            print("RESUMED_FROM_HOLD", flush=True)
     finally:
         if arm is not None:
-            try:
-                arm.protect_mode()
-            except Exception as exc:
-                print(f"protect_mode failed: {exc}", file=sys.stderr, flush=True)
+            if not normal_completion:
+                try:
+                    arm.protect_mode()
+                except Exception as exc:
+                    print(f"protect_mode failed: {exc}", file=sys.stderr, flush=True)
             try:
                 arm.close()
             except Exception:

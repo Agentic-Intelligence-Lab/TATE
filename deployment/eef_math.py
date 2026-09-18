@@ -70,8 +70,6 @@ def tcp_action_to_flange(
     current = np.asarray(current_tcp, dtype=np.float64)
     if target.shape != (8,) or current.shape != (8,) or not np.isfinite(target).all() or not np.isfinite(current).all():
         raise ValueError("target and current TCP must have eight finite values")
-    if not 0.0 <= target[7] <= 1.0:
-        raise ValueError("model gripper action must be in [0, 1]")
     if not np.isfinite(gripper_threshold) or not 0.0 <= gripper_threshold <= 1.0:
         raise ValueError("gripper threshold must be in [0, 1]")
     for value, (lower, upper), name in zip(target[:3], (limits.x_range, limits.y_range, limits.z_range), "xyz"):
@@ -94,7 +92,11 @@ def tcp_action_to_flange(
     flange_xyzrpy = np.asarray([*flange_xyz, *target_rotation.as_euler("xyz")], dtype=np.float64)
     # The policy is trained on binary grasp labels.  Command an endpoint so
     # the gripper supplies holding force even when an object prevents closure.
-    gripper_raw = GRIPPER_CLOSED_RAW if target[7] > gripper_threshold else GRIPPER_OPEN_RAW
+    # Diffusion/regression outputs are finite but not intrinsically bounded.
+    # The gripper label is binary, so saturating this one non-motion dimension
+    # is safe; pose, workspace, quaternion, and IK guards remain strict.
+    gripper_state = float(np.clip(target[7], 0.0, 1.0))
+    gripper_raw = GRIPPER_CLOSED_RAW if gripper_state > gripper_threshold else GRIPPER_OPEN_RAW
     return flange_xyzrpy, gripper_raw
 
 

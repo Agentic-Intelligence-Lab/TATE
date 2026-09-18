@@ -29,6 +29,15 @@ class DeploymentGripperBinaryTests(unittest.TestCase):
         self.assertEqual(closed, GRIPPER_CLOSED_RAW)
         self.assertEqual(open_, GRIPPER_OPEN_RAW)
 
+    def test_out_of_range_policy_gripper_action_is_safely_saturated(self) -> None:
+        current = flange_to_tcp_state(np.zeros(6), -3.4)
+        target = np.asarray([0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 1.0, -0.01])
+        _, open_ = tcp_action_to_flange(target, current, GuardLimits())
+        target[-1] = 1.01
+        _, closed = tcp_action_to_flange(target, current, GuardLimits())
+        self.assertEqual(open_, GRIPPER_OPEN_RAW)
+        self.assertEqual(closed, GRIPPER_CLOSED_RAW)
+
 
 if __name__ == "__main__":
     unittest.main()

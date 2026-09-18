@@ -166,6 +166,13 @@ def guarded_target(
     tcp_offset_m: np.ndarray,
     gripper_threshold: float,
 ):
+    predicted_gripper = float(action[15])
+    if not 0.0 <= predicted_gripper <= 1.0:
+        print(
+            "GRIPPER_ACTION_CLIPPED "
+            f"raw={predicted_gripper:.6f} clipped={np.clip(predicted_gripper, 0.0, 1.0):.6f}",
+            flush=True,
+        )
     flange, gripper_raw = tcp_action_to_flange(
         action[8:16], tcp, limits, tcp_offset_m=tcp_offset_m, gripper_threshold=gripper_threshold
     )

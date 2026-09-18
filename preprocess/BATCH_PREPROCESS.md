@@ -159,7 +159,7 @@ lerobot:
   enabled: true
   task: "pick two cola cans and place them in the brown box"
   video_mode: hardlink
-  replace_state_action: false             # preserve source state/action by default
+  replace_state_action: true
   action_alignment: same_frame
   gripper_open_raw: -3.4
   gripper_closed_raw: 0.1
@@ -226,21 +226,12 @@ $PY -m preprocess.batch_preprocess \
 
 ### Complete dataset
 
-When `--stages` is omitted, the default is:
+The default value of `--stages` is `all`:
 
 ```bash
 $PY -m preprocess.batch_preprocess \
   --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml
 ```
-
-```text
-wilor,eef,correct,visualize,package
-```
-
-IK retargeting is intentionally excluded. The default package retains the
-source dataset's `observation.state` and `action`; final EEF fields are added
-as `tate.eef.*` columns. To create retargeted policy targets, set
-`lerobot.replace_state_action: true` and explicitly select `retarget`:
 
 ```text
 wilor,eef,correct,retarget,visualize,package
@@ -252,13 +243,7 @@ wilor,eef,correct,retarget,visualize,package
 # Rebuild downstream trajectories from existing WiLoR caches.
 $PY -m preprocess.batch_preprocess \
   --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
-  --stages eef,correct
-
-# Opt in to IK and package retargeted state/action targets.
-$PY -m preprocess.batch_preprocess \
-  --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
-  --stages retarget,package \
-  --force-stage package
+  --stages eef,correct,retarget
 
 # Render or resume visualization only.
 $PY -m preprocess.batch_preprocess \
@@ -404,10 +389,8 @@ tate.eef.<side>.grasp_ratio
 tate.eef.<side>.valid
 ```
 
-With `replace_state_action: false` (the default), source
-`observation.state` and `action` are retained. Set it to `true` only when the
-explicit `retarget` stage has produced IK artifacts; retargeted ARX joint
-targets then replace those columns. `action_alignment` accepts `same_frame` or
+With `replace_state_action: true`, retargeted ARX joint targets replace
+`observation.state` and `action`. `action_alignment` accepts `same_frame` or
 `next_frame`. Untrimmed videos are hard-linked when possible. Image statistics
 are recomputed for trimmed videos. `lerobot.task` is written consistently to
 frame data, episode metadata, and `tasks.parquet`.

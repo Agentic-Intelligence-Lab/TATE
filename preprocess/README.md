@@ -139,9 +139,7 @@ The main examples are:
 
 ### Batch stages
 
-Omitting `--stages` runs `wilor,eef,correct,visualize,package`; it does not
-run IK retargeting. Use `--stages all` or explicitly include `retarget` when
-IK output is required.
+Omitting `--stages` is equivalent to `--stages all`.
 
 | Stage | Input | Purpose and output |
 | --- | --- | --- |
@@ -172,7 +170,7 @@ $PY -m preprocess.batch_preprocess \
   --stages wilor,eef,correct,retarget,visualize
 ```
 
-After checking visualization and EEF, run the complete dataset:
+After checking visualization, EEF, and IK, run the complete dataset:
 
 ```bash
 $PY -m preprocess.batch_preprocess \
@@ -184,7 +182,7 @@ To reuse existing WiLoR caches and regenerate only downstream trajectories:
 ```bash
 $PY -m preprocess.batch_preprocess \
   --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml \
-  --stages eef,correct
+  --stages eef,correct,retarget
 ```
 
 To render or resume only the visualization stage:

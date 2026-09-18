@@ -138,17 +138,16 @@ $PY -m preprocess.batch_preprocess \
   --config cfg/preprocess/batch/stack_cola_h2g_ablation.yaml
 ```
 
-Omitting `--stages` runs all regular preprocessing and packaging stages except
-IK retargeting:
+Omitting `--stages` is equivalent to `--stages all`:
 
 | Stage | Result |
 | --- | --- |
 | `wilor` | Ego RGB to shared two-hand reconstruction caches |
 | `eef` | Each Hand2Gripper mode to robot-frame raw TCP trajectories |
 | `correct` | Each H2G/correction combination to final EEF trajectories |
-| `retarget` | Final EEF to ARX joint IK trajectories (explicit opt-in) |
+| `retarget` | Final EEF to ARX joint IK trajectories |
 | `visualize` | RGB + WiLoR + raw EEF diagnostic videos |
-| `package` | Final EEF written into one LeRobot training dataset per run; IK is optional |
+| `package` | Final EEF/IK written into one LeRobot training dataset per run |
 
 Batch processing resumes by default: repeating a command skips complete outputs
 with matching signatures. Do not normally add `--fail-fast`, so one bad episode

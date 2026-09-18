@@ -1,5 +1,5 @@
 # Finger-Center correction ablation: none / position / rotation / both.
-experiment_id: stack_redcube_v2
+experiment_id: stack_redcube_v2_2
 
 source:
   ego_dataset: /mnt/data/xule/Data_TATE/stack_redcube_v2_ego
@@ -75,7 +75,7 @@ lerobot:
   enabled: true
   task: "pick the cube and stack it on the blue plate"
   video_mode: hardlink
-  replace_state_action: false
+  replace_state_action: true
   action_alignment: same_frame
   gripper_open_raw: -3.4
   gripper_closed_raw: 0.1

@@ -194,14 +194,14 @@ class ProcessManager:
         if fingerprint is None:
             raise HTTPException(409, "checkpoint 模型文件不存在")
         with self.lock:
-            if self.process is not None and self.process.poll() is None:
-                raise HTTPException(409, "真机任务运行中，不能切换 checkpoint")
             if (
                 self.policy_process is not None
                 and self.policy_process.poll() is None
                 and self.policy_fingerprint == fingerprint
             ):
                 return self.policy_snapshot(checkpoint_dir)
+        self.hold_for_policy_switch()
+        with self.lock:
             self._stop_policy_locked()
             child_env = os.environ.copy()
             child_env["TATE_CHECKPOINT_DIR"] = str(checkpoint_dir)
@@ -221,6 +221,32 @@ class ProcessManager:
             self.logs.append(f"$ TATE_CHECKPOINT_DIR={checkpoint_dir} {POLICY_PYTHON} {POLICY_SCRIPT} --mode serve --port 8019")
             threading.Thread(target=self._policy_reader, args=(process,), daemon=True).start()
             return self.policy_snapshot(checkpoint_dir)
+
+    def hold_for_policy_switch(self) -> None:
+        """Stop policy actions before replacing the local policy server."""
+        with self.lock:
+            process = self.process
+            if process is None or process.poll() is not None or self.mode == "holding":
+                return
+            robot_pid = self._robot_pid(process.pid)
+            if robot_pid is None:
+                raise HTTPException(409, "机器人进程尚未就绪，不能切换 checkpoint")
+            self.mode = "stopping"
+            self.last_result = "正在保持右臂位置并切换 checkpoint"
+            try:
+                os.kill(robot_pid, signal.SIGUSR2)
+            except ProcessLookupError:
+                return
+
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            with self.lock:
+                if self.mode == "holding":
+                    return
+                if self.process is None or self.process.poll() is not None:
+                    return
+            time.sleep(0.1)
+        raise HTTPException(409, "右臂尚未进入保持状态，暂不能切换 checkpoint")
 
     def policy_snapshot(self, checkpoint_dir: Path) -> dict:
         with self.lock:

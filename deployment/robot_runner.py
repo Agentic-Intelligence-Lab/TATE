@@ -68,7 +68,17 @@ def move_to_start_pose(arm, frames: list[tuple[np.ndarray, float]], should_stop)
     # Do not interpolate or repeatedly issue intermediate commands.
     send_target(arm, q, grip)
     deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and not should_stop():
+    while time.monotonic() < deadline:
+        if should_stop():
+            # A direct target remains active in the ARX controller until a new
+            # command arrives. Cancel it before this process exits or enters
+            # protect mode, so a UI-service restart cannot complete the old
+            # move-to-frame-60 command in the background.
+            feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
+            if feedback.shape == (7,) and np.isfinite(feedback).all():
+                send_target(arm, feedback[:6], float(np.clip(feedback[6], -3.4, 0.1)))
+                print("START_POSE_CANCELLED_HOLDING_CURRENT_POSITION", flush=True)
+            raise RuntimeError("start-pose movement stopped by operator")
         feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
         if feedback.shape != (7,) or not np.isfinite(feedback).all():
             raise RuntimeError("invalid feedback during start-pose movement")

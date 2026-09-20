@@ -125,7 +125,7 @@ class ProcessManager:
                     self.last_result = "已检查真实数据第 60 帧目标，等待 MOVE 确认"
                 elif clean.startswith("MOVE accepted"):
                     self.mode = "moving_start_pose"
-                    self.last_result = "正缓慢移动到真实数据第 60 帧"
+                    self.last_result = "正直接移动到真实数据第 60 帧"
                 elif clean.startswith("START_POSE_REACHED"):
                     self.mode = "preparing"
                     self.last_result = "起点已到达，正在采集画面并推理首个目标"
@@ -311,7 +311,7 @@ class ProcessManager:
                 raise HTTPException(409, "当前没有等待 MOVE 确认的起点")
             os.write(self.master_fd, b"MOVE\n")
             self.mode = "moving_start_pose"
-            self.last_result = "已发送 MOVE，等待右臂缓慢到达起点"
+            self.last_result = "已发送 MOVE，等待右臂到达起点"
 
     @staticmethod
     def _robot_pid(root_pid: int) -> int | None:

@@ -30,10 +30,10 @@
     <div class="grid"><div><label>当前状态</label><div id="run-state" class="state">空闲</div></div></div>
     <div class="tcp-row"><div><label for="tcp-x">TCP offset X（m）</label><input id="tcp-x" type="number" step="0.0001" value="0.15"></div><div><label for="tcp-y">TCP offset Y（m）</label><input id="tcp-y" type="number" step="0.0001" value="0"></div><div><label for="tcp-z">TCP offset Z（m）</label><input id="tcp-z" type="number" step="0.0001" value="0"></div></div>
     <p class="muted tcp-help">Flange → TCP。新数据/新 checkpoint 使用 <code>[0.15, 0, 0]</code>；旧 checkpoint 使用 <code>[0.105, 0.0018, -0.0063]</code>。该值同时用于真机观测和 action 的 IK 解码。</p>
-    <div class="start-row"><label><input id="start-pose" type="checkbox" checked>先移动右臂到真实 stack-cube 数据 episode 0 的第 60 帧（约 15 秒缓慢移动）</label></div>
+    <div class="start-row"><label><input id="start-pose" type="checkbox" checked>先直接移动右臂到真实 stack-cube 数据 episode 0 的第 60 帧</label></div>
     <div class="controls"><button id="check" onclick="startTask('check')">确认并加载 checkpoint</button><button id="smoke" onclick="startTask('smoke')">假数据推理</button><button id="prepare" class="primary" onclick="startTask('execute')">准备真机测试</button><button id="move" class="confirm" onclick="confirmMove()">确认 MOVE</button><button id="confirm" class="confirm" onclick="confirmRun()">确认 RUN</button></div>
     <div class="controls second"><button id="pause" onclick="postAction('pause')">暂停 / 继续</button><button id="stop" class="danger" onclick="postAction('stop')">结束测试</button><button id="reset" onclick="postAction('reset')">复位</button></div>
-    <p class="notice">输入路径后点击“确认并加载”，权重会常驻 GPU 并被后续测试复用。权重加载完成后即可点击“复位”使右臂回到零位。勾选起点后，“准备真机测试”会先检查并显示第 60 帧关节目标；检查现场无障碍后点击“确认 MOVE”，右臂缓慢到位。点击“结束测试”会保持右臂在最终位置；保持或复位完成后可修改频率、执行步数、夹爪阈值和 TCP offset，再点击“准备真机测试”应用新参数并继续同一会话。</p>
+    <p class="notice">输入路径后点击“确认并加载”，权重会常驻 GPU 并被后续测试复用。权重加载完成后即可点击“复位”使右臂回到零位。勾选起点后，“准备真机测试”会先检查并显示第 60 帧关节目标；点击“确认 MOVE”后，右臂会直接移动到位。点击“结束测试”会保持右臂在最终位置；保持或复位完成后可修改频率、执行步数、夹爪阈值和 TCP offset，再点击“准备真机测试”应用新参数并继续同一会话。</p>
   </section>
   <section class="card"><h2>策略摄像头输入</h2><div class="cameras">
     <figure class="camera"><figcaption>HEAD · 409122273248</figcaption><img src="/camera/head" alt="头部相机"></figure>

@@ -49,7 +49,7 @@ START_POSE_FILE = APP_ROOT / "deployment" / "start_pose.json"
 def start_pose_trajectory(
     sdk, current: np.ndarray, limits: GuardLimits, tcp_offset_m: np.ndarray
 ) -> tuple[list[tuple[np.ndarray, float]], dict]:
-    """Preflight a slow joint ramp to the recorded frame before any command."""
+    """Return the recorded start pose as one direct joint command."""
     record = json.loads(START_POSE_FILE.read_text(encoding="utf-8"))
     target = np.asarray(record["joint_position_rad"], dtype=np.float64)
     grip = float(record["gripper_raw"])
@@ -57,48 +57,22 @@ def start_pose_trajectory(
         raise ValueError("recorded start pose is malformed")
     if np.any(target < JOINT_LOWER) or np.any(target > JOINT_UPPER) or not -3.4 <= grip <= 0.1:
         raise ValueError("recorded start pose is outside joint or gripper limits")
-    if current.shape != (7,) or not np.isfinite(current).all():
-        raise ValueError("current robot feedback is malformed")
-    # Smoothstep limits peak velocity to about 0.12 rad/s at 5 Hz.
-    count = max(15, int(np.ceil(np.max(np.abs(target - current[:6])) / 0.016)))
-    frames = []
-    for i in range(1, count + 1):
-        u = i / count
-        alpha = u * u * (3.0 - 2.0 * u)
-        q = current[:6] + alpha * (target - current[:6])
-        g = float(current[6] + alpha * (grip - current[6]))
-        flange = np.asarray(sdk.forward_kinematics(q, type=2), dtype=np.float64)
-        tcp = flange_to_tcp_state(flange, g, tcp_offset_m=tcp_offset_m)
-        for value, (lower, upper), axis in zip(tcp[:3], (limits.x_range, limits.y_range, limits.z_range), "xyz"):
-            if not lower <= value <= upper:
-                raise ValueError(f"start-pose ramp TCP {axis} outside workspace: {value:.4f}")
-        frames.append((q, g))
-    return frames, record
+    return [(target, grip)], record
 
 
 def move_to_start_pose(arm, frames: list[tuple[np.ndarray, float]], should_stop) -> None:
-    consecutive_lag = 0
-    for i, (q, grip) in enumerate(frames, 1):
-        if should_stop():
-            raise RuntimeError("start-pose movement stopped by operator")
-        tick = time.monotonic()
-        send_target(arm, q, grip)
-        time.sleep(max(0.0, 0.2 - (time.monotonic() - tick)))
+    q, grip = frames[-1]
+    if should_stop():
+        raise RuntimeError("start-pose movement stopped by operator")
+    # The ARX controller executes this target at its configured joint speed.
+    # Do not interpolate or repeatedly issue intermediate commands.
+    send_target(arm, q, grip)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not should_stop():
         feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
         if feedback.shape != (7,) or not np.isfinite(feedback).all():
             raise RuntimeError("invalid feedback during start-pose movement")
-        lag = float(np.max(np.abs(feedback[:6] - q)))
-        consecutive_lag = consecutive_lag + 1 if lag > 0.15 else 0
-        if consecutive_lag >= 8:
-            raise RuntimeError(f"start-pose tracking lag exceeded 0.15 rad: {lag:.3f}")
-        if i % 10 == 0 or i == len(frames):
-            print(f"START_POSE_PROGRESS {i}/{len(frames)} max_joint_lag_rad={lag:.3f}", flush=True)
-    deadline = time.monotonic() + 4.0
-    while time.monotonic() < deadline and not should_stop():
-        feedback = np.asarray(arm.get_joint_positions(), dtype=np.float64)
-        # An object can stop the gripper before its requested endpoint.  Joint
-        # convergence is required here; endpoint gripper feedback is not.
-        if np.max(np.abs(feedback[:6] - frames[-1][0])) <= 0.05:
+        if np.max(np.abs(feedback[:6] - q)) <= 0.05:
             print(f"START_POSE_REACHED {np.array2string(feedback, precision=5)}", flush=True)
             return
         time.sleep(0.1)
@@ -363,7 +337,7 @@ def main() -> int:
             print(f"START_POSE_SOURCE episode={record['episode_index']} frame={record['frame_index']} side={record['side']}", flush=True)
             print(f"START_POSE_CURRENT_JOINTS {np.array2string(initial, precision=5)}", flush=True)
             print(f"START_POSE_TARGET_JOINTS {np.array2string(frames[-1][0], precision=5)} gripper_raw={frames[-1][1]:.5f}", flush=True)
-            print(f"START_POSE_RAMP frames={len(frames)} rate_hz=5", flush=True)
+            print("START_POSE_DIRECT_COMMAND", flush=True)
             if not wait_for_start_pose(lambda: stop):
                 print("MOVE not confirmed; no motion action sent", flush=True)
                 return 2
@@ -472,7 +446,7 @@ def main() -> int:
                 print(f"START_POSE_SOURCE episode={record['episode_index']} frame={record['frame_index']} side={record['side']}", flush=True)
                 print(f"START_POSE_CURRENT_JOINTS {np.array2string(initial, precision=5)}", flush=True)
                 print(f"START_POSE_TARGET_JOINTS {np.array2string(frames[-1][0], precision=5)} gripper_raw={frames[-1][1]:.5f}", flush=True)
-                print(f"START_POSE_RAMP frames={len(frames)} rate_hz=5 automatic_resume=true", flush=True)
+                print("START_POSE_DIRECT_COMMAND automatic_resume=true", flush=True)
                 move_to_start_pose(arm, frames, lambda: stop)
                 preflight_target(arm, rig, sdk, limits, tcp_offset_m, args)
                 if not wait_for_run(lambda: stop):

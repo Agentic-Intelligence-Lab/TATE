@@ -41,6 +41,7 @@ POLICY_PYTHON = Path(
 )
 POLICY_READY_MARKER = POLICY_PYTHON.parent.parent / ".tate_inference_ready"
 IDLE_PREVIEW_DIR = Path("/tmp/tate_arx_camera_idle")
+LOG_DIR = Path(os.environ.get("TATE_LOG_DIR", str(APP_ROOT / "logs")))
 
 
 def selected_checkpoint(raw_path: str | None) -> Path:
@@ -96,6 +97,15 @@ class CheckpointRequest(BaseModel):
 class ProcessManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        self.log_path: Path | None = None
+        self._log_file = None
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            self.log_path = LOG_DIR / f"console_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+            self._log_file = self.log_path.open("a", encoding="utf-8", buffering=1)
+        except OSError:
+            # The console remains usable if a custom log directory is invalid.
+            self.log_path = None
         self.process: subprocess.Popen[bytes] | None = None
         self.master_fd: int | None = None
         self.mode = "idle"
@@ -109,14 +119,30 @@ class ProcessManager:
         self.policy_fingerprint: tuple[str, int, int] | None = None
         self.policy_state = "idle"
         self.policy_error: str | None = None
+        self._record_locked("CONSOLE_STARTED")
+
+    def _record_locked(self, line: str) -> None:
+        clean = line.replace("\r", "").strip()
+        if not clean:
+            return
+        self.logs.append(clean[-500:])
+        if self._log_file is not None:
+            try:
+                self._log_file.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {clean}\n")
+            except OSError:
+                self._log_file = None
+
+    def record(self, line: str) -> None:
+        with self.lock:
+            self._record_locked(line)
 
     def _append(self, value: str) -> None:
         with self.lock:
             for line in value.replace("\r", "").splitlines():
                 if not line.strip():
                     continue
-                clean = line[-500:]
-                self.logs.append(clean)
+                clean = line.strip()
+                self._record_locked(clean)
                 if "READY_FOR_RUN" in clean and self.mode == "preparing":
                     self.mode = "awaiting_confirmation"
                     self.last_result = "首个目标已通过检查，等待 RUN 确认"
@@ -156,8 +182,8 @@ class ProcessManager:
             for line in value.replace("\r", "").splitlines():
                 if not line.strip():
                     continue
-                clean = "POLICY | " + line[-490:]
-                self.logs.append(clean)
+                clean = "POLICY | " + line.strip()
+                self._record_locked(clean)
                 if "POLICY_READY" in line and self.policy_process is not None:
                     self.policy_state = "ready"
                     self.policy_error = None
@@ -175,6 +201,7 @@ class ProcessManager:
                         self.policy_state = "failed"
                         self.policy_error = f"策略进程退出，状态码 {code}"
                     self.policy_process = None
+                    self._record_locked(f"POLICY_PROCESS_EXIT code={code}")
 
     def _stop_policy_locked(self) -> None:
         process = self.policy_process
@@ -218,7 +245,7 @@ class ProcessManager:
             self.policy_fingerprint = fingerprint
             self.policy_state = "loading"
             self.policy_error = None
-            self.logs.append(f"$ TATE_CHECKPOINT_DIR={checkpoint_dir} {POLICY_PYTHON} {POLICY_SCRIPT} --mode serve --port 8019")
+            self._record_locked(f"$ TATE_CHECKPOINT_DIR={checkpoint_dir} {POLICY_PYTHON} {POLICY_SCRIPT} --mode serve --port 8019")
             threading.Thread(target=self._policy_reader, args=(process,), daemon=True).start()
             return self.policy_snapshot(checkpoint_dir)
 
@@ -290,6 +317,7 @@ class ProcessManager:
                     self.process = None
                     self.master_fd = None
                     self.active_checkpoint = None
+                    self._record_locked(f"TASK_PROCESS_EXIT code={code}")
 
     def launch(self, command: list[str], mode: str, checkpoint_dir: Path | None = None, confirmation: str | None = None) -> None:
         with self.lock:
@@ -318,7 +346,7 @@ class ProcessManager:
             self.started_at = time.time()
             self.last_result = "启动中"
             self.logs.clear()
-            self.logs.append("$ " + (f"TATE_CHECKPOINT_DIR={checkpoint_dir} " if checkpoint_dir else "") + " ".join(command))
+            self._record_locked("$ " + (f"TATE_CHECKPOINT_DIR={checkpoint_dir} " if checkpoint_dir else "") + " ".join(command))
             threading.Thread(target=self._reader, args=(process, master_fd, mode, checkpoint_dir), daemon=True).start()
             if confirmation is not None:
                 os.write(master_fd, (confirmation + "\n").encode("utf-8"))
@@ -428,6 +456,7 @@ class ProcessManager:
                 "result": self.last_result,
                 "smoke_ready": self.smoke_fingerprint is not None and self.smoke_fingerprint == model_fingerprint(checkpoint_dir),
                 "logs": list(self.logs),
+                "log_path": str(self.log_path) if self.log_path is not None else None,
                 **self.policy_snapshot(checkpoint_dir),
             }
 
@@ -598,7 +627,7 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
                 result = response.read().decode("utf-8")
         except (OSError, URLError) as exc:
             raise HTTPException(503, f"策略服务不可用: {exc}") from exc
-        manager.logs.append(f"SMOKE_INFERENCE_OK {result}")
+        manager.record(f"SMOKE_INFERENCE_OK {result}")
         return {"ok": True, **manager.policy_snapshot(selected)}
     tcp_offset = tuple(float(value) for value in req.tcp_offset_m)
     if not all(math.isfinite(value) for value in tcp_offset) or math.sqrt(sum(value * value for value in tcp_offset)) > 0.30:

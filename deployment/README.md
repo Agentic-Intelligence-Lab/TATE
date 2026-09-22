@@ -60,6 +60,9 @@ five minutes. On the training L20Y, dummy-image inference without Torch
 compilation took 1.09 seconds, so the actual inference rate is lower than the selected limit.
 The console's gripper threshold defaults to `0.5`: a predicted continuous grasp
 value greater than this value commands closure; otherwise it commands opening.
+The console persists runner and policy output in a timestamped file under
+`/home/qijun/TATE/logs/` by default. Set `TATE_LOG_DIR` before starting the
+service to store these logs elsewhere.
 Pause, stop, and the existing ARX reset wrapper are available on the page. The hardware
 wrapper takes the shared arm lock and restores the original ARX data and button
 services when the session exits.

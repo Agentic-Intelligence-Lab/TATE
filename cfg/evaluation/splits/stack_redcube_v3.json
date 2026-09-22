@@ -1,8 +1,8 @@
 {
   "schema": "tate.real_evaluation_split",
   "schema_version": 1,
-  "task": "stack_redcube_v1",
-  "real_manifest_fingerprint": "5295c8e001d2f534da9090fb44119bc0d9fa320daf3fcb6838decddf023e3f5e",
+  "task": "stack_redcube_v3",
+  "real_manifest_fingerprint": "bd059556fe036bc37398f9ceefdc46a59a2855e7181f2fd6731d390d745c84c0",
   "calibration": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
   "eval": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
   "reserve": [],

@@ -1,11 +1,11 @@
 # Finger-Center correction ablation: none / position / rotation / both.
-experiment_id: stack_redcube_v1_0
+experiment_id: stack_redcube_v3
 
 source:
-  ego_dataset: /mnt/data/xule/Data_TATE/stack_redcube_v1_ego
+  ego_dataset: /mnt/data/xule/Data_TATE/stack_redcube_v3_ego
   video_key: observation.images.head
-  real_dataset: /mnt/data/xule/Data_TATE/stack_redcube_v1_arx
-  real_manifest: outputs/arx_real_flange/stack_redcube_v1_arx/manifest.json
+  real_dataset: /mnt/data/xule/Data_TATE/stack_redcube_v3_arx
+  real_manifest: outputs/arx_real_flange/stack_redcube_v3_arx/manifest.json
 
 trajectory:
   arm_mode: single_arm
@@ -41,8 +41,8 @@ correction_variants:
 
   position_rotation:
     mode: pose_correction
-    artifact: outputs/corrections/stack_redcube_v1/xyz_mean_target_min_bending_all_anchors.json
-    rotation_artifact: outputs/corrections/stack_redcube_v1/global_rotation_finger_center.json
+    artifact: outputs/corrections/stack_redcube_v3/xyz_mean_target_min_bending_all_anchors.json
+    rotation_artifact: outputs/corrections/stack_redcube_v3/global_rotation_finger_center.json
     options: 
       target_mode: mean
       space: free_xyz

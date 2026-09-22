@@ -1,5 +1,5 @@
 # Finger-Center correction ablation: none / position / rotation / both.
-experiment_id: stack_redcube_v1_0
+experiment_id: stack_redcube_v1
 
 source:
   ego_dataset: /mnt/data/xule/Data_TATE/stack_redcube_v1_ego

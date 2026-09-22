@@ -144,6 +144,15 @@ def main() -> None:
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--state-dropout-probability",
+        type=float,
+        default=0.0,
+        help=(
+            "Training-only probability of replacing the full normalized 16-D "
+            "robot state with zeros; inference always receives the true state."
+        ),
+    )
     parser.add_argument("--loss-action-dim", type=int, default=ACTION_DIM)
     parser.add_argument(
         "--action-mask",
@@ -161,6 +170,8 @@ def main() -> None:
         raise ValueError("--epochs must be positive")
     if args.num_train_steps is not None and args.num_train_steps <= 0:
         raise ValueError("--num-train-steps must be positive")
+    if not 0.0 <= args.state_dropout_probability <= 1.0:
+        raise ValueError("--state-dropout-probability must be in [0, 1]")
     if args.loss_action_dim > ACTION_DIM:
         raise ValueError(f"--loss-action-dim cannot exceed ARX EEF action dimension {ACTION_DIM}")
     if args.loss_action_dim > 32:
@@ -196,6 +207,7 @@ def main() -> None:
         wandb_enabled=args.wandb,
         overwrite=args.overwrite,
         resume=args.resume,
+        state_dropout_probability=args.state_dropout_probability,
     )
 
     openpi_train_pytorch = _load_openpi_pytorch_trainer()
@@ -205,6 +217,7 @@ def main() -> None:
     if args.loss_action_dim != ACTION_DIM and not all(action_mask[args.loss_action_dim:]):
         raise ValueError("--loss-action-dim cannot hide masked dimensions; use the 16-D default")
     print(f"ARX EEF action loss mask: {[int(value) for value in action_mask]}")
+    print(f"ARX EEF training state dropout probability: {args.state_dropout_probability:.3f}")
     _patch_pytorch_action_loss(args.loss_action_dim, action_mask)
     openpi_train_pytorch.train_loop(config)
 

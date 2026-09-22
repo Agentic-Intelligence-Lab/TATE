@@ -80,9 +80,15 @@ class ArxEefDataConfig(openpi_config.DataConfigFactory):
     # Kept only for legacy datasets which do not contain policy.image_mask.
     # New cotrain datasets provide an availability mask per sample.
     mask_wrist_images: bool | None = None
+    # Probability of replacing the complete normalized 16-D state with its
+    # normalization mean on a training sample. Kept at zero by default so
+    # existing experiments remain exactly reproducible.
+    state_dropout_probability: float = 0.0
 
     @override
     def create(self, assets_dirs: Path, model_config: _model.BaseModelConfig) -> openpi_config.DataConfig:
+        if not 0.0 <= self.state_dropout_probability <= 1.0:
+            raise ValueError("state_dropout_probability must be in [0, 1]")
         mask_wrist_images = bool(self.mask_wrist_images)
         repack_transform = transforms.Group(
             inputs=[
@@ -112,7 +118,13 @@ class ArxEefDataConfig(openpi_config.DataConfigFactory):
         )
         model_transforms = openpi_config.ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
         model_transforms = transforms.Group(
-            inputs=[arx_eef_policy.CastFloat32(), *model_transforms.inputs],
+            # Model transforms run after OpenPI normalization. State dropout
+            # therefore uses a zero vector as the normalized mean state.
+            inputs=[
+                arx_eef_policy.CastFloat32(),
+                arx_eef_policy.TrainOnlyStateDropout(self.state_dropout_probability),
+                *model_transforms.inputs,
+            ],
             outputs=model_transforms.outputs,
         )
         return dataclasses.replace(
@@ -142,7 +154,10 @@ def build_config(
     overwrite: bool = False,
     resume: bool = False,
     mask_wrist_images: bool | None = None,
+    state_dropout_probability: float = 0.0,
 ) -> openpi_config.TrainConfig:
+    if not 0.0 <= state_dropout_probability <= 1.0:
+        raise ValueError("state_dropout_probability must be in [0, 1]")
     if model == "pi0":
         model_config = pi0_config.Pi0Config(
             action_dim=MODEL_ACTION_DIM,
@@ -174,6 +189,7 @@ def build_config(
             repo_id=repo_id,
             base_config=openpi_config.DataConfig(prompt_from_task=True),
             mask_wrist_images=mask_wrist_images,
+            state_dropout_probability=state_dropout_probability,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(checkpoint),
         pytorch_weight_path=pytorch_weight_path,

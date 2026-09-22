@@ -130,6 +130,35 @@ class ArxEefInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class TrainOnlyStateDropout(transforms.DataTransformFn):
+    """Drop the complete normalized proprioceptive state on training samples.
+
+    OpenPI reuses model input transforms during inference.  Training samples
+    contain an action chunk while online observations do not, so ``actions`` is
+    the reliable boundary which keeps this augmentation out of deployment.
+    This transform is intentionally placed after normalization: an all-zero
+    vector then represents the normalization mean, rather than an arbitrary
+    physical TCP pose.
+    """
+
+    probability: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.probability <= 1.0:
+            raise ValueError("state dropout probability must be in [0, 1]")
+
+    def __call__(self, data: dict) -> dict:
+        if (
+            self.probability > 0.0
+            and "actions" in data
+            and np.random.random() < self.probability
+        ):
+            data = dict(data)
+            data["state"] = np.zeros_like(data["state"], dtype=np.float32)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class ArxEefOutputs(transforms.DataTransformFn):
     """Return only the 16 ARX EEF dimensions from a model action tensor."""
 

@@ -5,7 +5,8 @@ The exporter reads immutable 14-D joint datasets and writes independent
 LeRobot v2.1 ``train`` and ``eval`` repositories.  State/action are:
 ``[left xyz, xyzw, gripper, right xyz, xyzw, gripper]``.  Cube's absent left
 arm uses a canonical identity pose and false per-element state/action masks.
-Ego is head-only; real train can use reproducible camera dropout.
+Ego can be head-only or vision-free; real train can use reproducible camera
+dropout.
 """
 
 from __future__ import annotations
@@ -282,13 +283,14 @@ def resolve_real_split(spec: TaskSpec, real_ids: set[int], args: argparse.Namesp
 
 
 class DatasetWriter:
-    def __init__(self, root: Path, source_info: dict[str, Any], spec: TaskSpec, split: str, mode: str, active_mask: np.ndarray, split_source: str, overwrite: bool) -> None:
+    def __init__(self, root: Path, source_info: dict[str, Any], spec: TaskSpec, split: str, mode: str, ego_image_mode: str, active_mask: np.ndarray, split_source: str, overwrite: bool) -> None:
         if root.exists():
             if not overwrite:
                 raise FileExistsError(f"{root} exists; pass --overwrite")
             shutil.rmtree(root)
         self.root, self.source_info, self.spec = root, source_info, spec
-        self.split, self.mode, self.active_mask, self.split_source = split, mode, active_mask, split_source
+        self.split, self.mode, self.ego_image_mode = split, mode, ego_image_mode
+        self.active_mask, self.split_source = active_mask, split_source
         (root / "data").mkdir(parents=True)
         (root / "videos").mkdir(parents=True)
         (root / "meta").mkdir(parents=True)
@@ -297,7 +299,7 @@ class DatasetWriter:
         self.provenance: list[dict[str, Any]] = []
         self.states: list[np.ndarray] = []
         self.actions: list[np.ndarray] = []
-        self.image_counts = {"head_left_right": 0, "head_only": 0, "head_left": 0, "head_right": 0}
+        self.image_counts = {"head_left_right": 0, "head_only": 0, "head_left": 0, "head_right": 0, "none": 0}
         self.counts = {"ego": {"episodes": 0, "frames": 0}, "real": {"episodes": 0, "frames": 0}}
 
     def add(
@@ -373,7 +375,7 @@ class DatasetWriter:
         self.counts[source]["episodes"] += 1
         self.counts[source]["frames"] += length
         self.states.append(state); self.actions.append(action); self.global_index += length
-        for pattern, name in (((1, 1, 1), "head_left_right"), ((1, 0, 0), "head_only"), ((1, 1, 0), "head_left"), ((1, 0, 1), "head_right")):
+        for pattern, name in (((1, 1, 1), "head_left_right"), ((1, 0, 0), "head_only"), ((1, 1, 0), "head_left"), ((1, 0, 1), "head_right"), ((0, 0, 0), "none")):
             self.image_counts[name] += int(np.all(image_mask == pattern, axis=1).sum())
 
     def finish(self) -> dict[str, Any]:
@@ -398,7 +400,7 @@ class DatasetWriter:
         write_jsonl(self.root / "meta" / "tasks.jsonl", [{"task_index": 0, "task": self.spec.prompt}])
         write_jsonl(self.root / "meta" / "episodes.jsonl", self.episodes)
         write_jsonl(self.root / "meta" / "episodes_stats.jsonl", [])
-        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 3, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "gripper_binary_threshold_raw": DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
+        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 3, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_image_mode": self.ego_image_mode, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "gripper_binary_threshold_raw": DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
         return {"dataset": str(self.root), "episodes": len(self.episodes), "frames": self.global_index, "counts": self.counts}
 
 
@@ -456,6 +458,7 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
             spec,
             split,
             mode,
+            args.ego_image_mode,
             active_mask,
             split_source,
             args.overwrite,
@@ -486,7 +489,13 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
             for run in contiguous_runs(selected):
                 state, action = eef[run], eef[run + 1]
                 run_image_mask = (
-                    np.tile(np.asarray([1, 0, 0], dtype=bool), (len(run), 1))
+                    np.tile(
+                        np.asarray(
+                            [1, 0, 0] if args.ego_image_mode == "head" else [0, 0, 0],
+                            dtype=bool,
+                        ),
+                        (len(run), 1),
+                    )
                     if source == "ego"
                     else choose_real_image_masks(
                         len(run), camera_dropout and split == "train", probabilities, rng
@@ -520,6 +529,12 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dataset-modes", nargs="+", choices=("no_dropout", "camera_dropout"), default=("no_dropout", "camera_dropout"))
+    parser.add_argument(
+        "--ego-image-mode",
+        choices=("head", "none"),
+        default="head",
+        help="Visual input exposed to the model for ego samples (default: head).",
+    )
     parser.add_argument("--real-camera-mask-probs", nargs=4, type=float, default=(0.50, 0.25, 0.125, 0.125), metavar=("FULL", "HEAD", "HEAD_LEFT", "HEAD_RIGHT"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--real-train-ids", nargs="*", type=int, default=None)

@@ -58,8 +58,6 @@ def _validate_image_mask(value) -> np.ndarray:
     value = np.asarray(value, dtype=bool)
     if value.shape != (3,):
         raise ValueError(f"ARX image_mask must have shape (3,), got {value.shape}")
-    if not value[0]:
-        raise ValueError("ARX head camera must be available")
     return value
 
 
@@ -89,6 +87,8 @@ class ArxEefInputs(transforms.DataTransformFn):
         # A false model mask is authoritative, but blacking the corresponding
         # tensor also prevents a malformed downstream implementation from
         # accidentally learning from a camera declared unavailable.
+        if not dynamic_mask[0]:
+            head = np.zeros_like(head)
         if not dynamic_mask[1]:
             left = np.zeros_like(left)
         if not dynamic_mask[2]:

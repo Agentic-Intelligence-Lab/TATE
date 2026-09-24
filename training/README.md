@@ -185,8 +185,12 @@ $PY training/build_arx_cotrain_datasets.py \
   --overwrite
 ```
 
-`policy.image_mask` order is `[head, left, right]`. Ego frames always use
-`[1, 0, 0]`; real no-dropout frames use `[1, 1, 1]`. Camera dropout is enabled
+`policy.image_mask` order is `[head, left, right]`. Ego frames use `[1, 0, 0]`
+by default. For the no-ego-vision ablation, add `--ego-image-mode none` (and use
+a distinct `--dataset-label`); those frames use `[0, 0, 0]`. The video fields
+remain in the dataset to keep one common LeRobot schema, but the input transform
+zeros all three ego tensors and passes false masks to the model. Real
+no-dropout frames use `[1, 1, 1]`. Camera dropout is enabled
 with `--dataset-modes camera_dropout`; by default, real-train frames sample
 full/head-only/head+left/head+right at `0.5/0.25/0.125/0.125`. Real eval is
 always all-camera.

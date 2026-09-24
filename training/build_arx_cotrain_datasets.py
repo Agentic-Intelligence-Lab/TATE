@@ -82,8 +82,8 @@ TASKS = {
     "stack_redcube_v2": TaskSpec("stack_redcube_v2", "stack_redcube_v2_2", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
     "stack_redcube_v3": TaskSpec("stack_redcube_v3", "stack_redcube_v3", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
     "stack_redcube_e1": TaskSpec("stack_redcube_v1", "stack_redcube_e1", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
-    "stack_redcube_e2": TaskSpec("stack_redcube_e2", "stack_redcube_e2", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
-    "stack_redcube_e3": TaskSpec("stack_redcube_e3", "stack_redcube_e3", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
+    "stack_redcube_e2": TaskSpec("stack_redcube_v2", "stack_redcube_e2", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
+    "stack_redcube_e3": TaskSpec("stack_redcube_v3", "stack_redcube_e3", "finger_center_hys085__position_rotation", "pick red cubes and stack them on the blue plate", ("right",)),
 
 }
 

@@ -17,7 +17,7 @@ ARX real LeRobot data (14-D measured joints + three cameras)
 packaged ego joints + real joints
   -> final 16-D EEF LeRobot train/eval repository
   -> compute_arx_eef_norm_stats.py
-  -> train_arx_eef_pytorch.py
+  -> train_arx_eef_pytorch.py or train_arx_eef_jax.py
 ```
 
 `batch_preprocess` creates an ego variant. It does **not** make the final
@@ -245,6 +245,43 @@ repository after checkpoint creation.
 Use `--wandb` only after `wandb login` has been completed in this same `.venv`.
 Without W&B, loss is printed to the terminal at `--log-interval` intervals but
 is not saved as a local loss-curve file.
+
+### JAX / Flax variant
+
+`train_arx_eef_jax.py` uses OpenPI's native JAX trainer (`scripts/train.py`).
+Run it with one Python process (do **not** use `torchrun`); JAX discovers all
+visible GPUs itself. `--batch-size` is the global batch size and must be
+divisible by the number of visible JAX devices. Set `--fsdp-devices` to the
+number of GPUs to shard each model across; leave it at `1` for ordinary data
+parallel training.
+
+```bash
+cd /mnt/data/xule/TATE/thirdparty/openpi
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.90 \
+TATE_OPENPI_ROOT=$PWD ./.venv/bin/python \
+  /mnt/data/xule/TATE/training/train_arx_eef_jax.py \
+  --repo-id local/arx_eef_stack_cube_real_all_nodropout_train \
+  --dataset-root /mnt/data/xule/TATE/outputs/lerobot/local/arx_eef_stack_cube_real_all_nodropout_train \
+  --model pi05 \
+  --assets-base-dir /mnt/data/xule/TATE/outputs/openpi_assets \
+  --checkpoint-base-dir /mnt/data/xule/TATE/outputs/openpi_checkpoints \
+  --batch-size 2 \
+  --num-workers 4 \
+  --epochs 2 \
+  --save-interval 1000 \
+  --log-interval 20 \
+  --exp-name stack_cube_real_all_pi05_jax
+```
+
+The JAX entry point initializes from the configured native OpenPI base
+checkpoint (`gs://openpi-assets/checkpoints/pi05_base/params` for Pi0.5), and
+writes Orbax checkpoints. It cannot load the PyTorch
+`model.safetensors` given to `train_arx_eef_pytorch.py`; convert a JAX
+checkpoint to PyTorch only when a PyTorch deployment/evaluation workflow needs
+one. The JAX script also preserves the dataset's 16-D ARX action mask, so the
+inactive left arm in `stack_cube` does not contribute loss after OpenPI pads the
+actions to 32 dimensions.
 
 ## 7. Offline evaluation
 

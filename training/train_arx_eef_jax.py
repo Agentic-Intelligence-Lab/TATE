@@ -149,6 +149,15 @@ def main() -> None:
     parser.add_argument("--checkpoint-base-dir", default=None)
     parser.add_argument("--exp-name", default="arx_eef_pi05_jax")
     parser.add_argument("--model", choices=["pi0", "pi05"], default="pi05")
+    parser.add_argument(
+        "--jax-weight-path",
+        default=None,
+        help=(
+            "Local directory (or gs:// URL) of an OpenPI native JAX base "
+            "checkpoint's params directory. Defaults to the base checkpoint "
+            "configured for --model. Do not pass a PyTorch model.safetensors directory."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=8, help="Global batch size across all JAX devices.")
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--epochs", type=int, default=DEFAULT_TRAIN_EPOCHS)
@@ -204,6 +213,16 @@ def main() -> None:
         resume=args.resume,
         state_dropout_probability=args.state_dropout_probability,
     )
+    if args.jax_weight_path is not None:
+        weight_path = Path(args.jax_weight_path).expanduser()
+        if not str(args.jax_weight_path).startswith("gs://") and not weight_path.is_dir():
+            raise FileNotFoundError(
+                "--jax-weight-path must name OpenPI's native JAX `params` directory; "
+                f"not found: {weight_path}"
+            )
+        from openpi.training import weight_loaders
+
+        config = dataclasses.replace(config, weight_loader=weight_loaders.CheckpointWeightLoader(args.jax_weight_path))
     config = dataclasses.replace(config, fsdp_devices=args.fsdp_devices, seed=args.seed)
 
     action_mask = (

@@ -283,6 +283,12 @@ one. The JAX script also preserves the dataset's 16-D ARX action mask, so the
 inactive left arm in `stack_cube` does not contribute loss after OpenPI pads the
 actions to 32 dimensions.
 
+To use a downloaded base model rather than the default `gs://` location, pass
+its native JAX `params` directory with `--jax-weight-path`, for example
+`--jax-weight-path /mnt/workspace/models/pi05_base/params`. This must be the
+Orbax/OpenPI JAX checkpoint directory, not a directory containing
+`model.safetensors`.
+
 ## 7. Offline evaluation
 
 `evaluate_arx_eef_pytorch.py` evaluates the first action predicted from each

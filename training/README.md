@@ -195,6 +195,13 @@ with `--dataset-modes camera_dropout`; by default, real-train frames sample
 full/head-only/head+left/head+right at `0.5/0.25/0.125/0.125`. Real eval is
 always all-camera.
 
+To limit a source, add `--ego-count N` or `--real-count N`. Each
+deterministically includes the first `N` source episodes ordered by episode ID
+(for example, `--ego-count 20 --real-count 10`); omitting either includes every
+episode from that source. `--real-count` and `--real-ids` are mutually exclusive.
+The selected ego and real IDs are saved in each output repository's
+`cotrain_provenance.json`.
+
 ## 5. Compute normalization for every new train repository
 
 The normalization assets must come from the exact training repository, not its

@@ -283,13 +283,15 @@ def resolve_real_split(spec: TaskSpec, real_ids: set[int], args: argparse.Namesp
 
 
 class DatasetWriter:
-    def __init__(self, root: Path, source_info: dict[str, Any], spec: TaskSpec, split: str, mode: str, ego_image_mode: str, active_mask: np.ndarray, split_source: str, overwrite: bool) -> None:
+    def __init__(self, root: Path, source_info: dict[str, Any], spec: TaskSpec, split: str, mode: str, ego_image_mode: str, ego_selected_episode_ids: list[int], real_selected_episode_ids: list[int], active_mask: np.ndarray, split_source: str, overwrite: bool) -> None:
         if root.exists():
             if not overwrite:
                 raise FileExistsError(f"{root} exists; pass --overwrite")
             shutil.rmtree(root)
         self.root, self.source_info, self.spec = root, source_info, spec
         self.split, self.mode, self.ego_image_mode = split, mode, ego_image_mode
+        self.ego_selected_episode_ids = ego_selected_episode_ids
+        self.real_selected_episode_ids = real_selected_episode_ids
         self.active_mask, self.split_source = active_mask, split_source
         (root / "data").mkdir(parents=True)
         (root / "videos").mkdir(parents=True)
@@ -400,7 +402,7 @@ class DatasetWriter:
         write_jsonl(self.root / "meta" / "tasks.jsonl", [{"task_index": 0, "task": self.spec.prompt}])
         write_jsonl(self.root / "meta" / "episodes.jsonl", self.episodes)
         write_jsonl(self.root / "meta" / "episodes_stats.jsonl", [])
-        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 3, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_image_mode": self.ego_image_mode, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "gripper_binary_threshold_raw": DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
+        write_json(self.root / "cotrain_provenance.json", {"schema": "tate.arx_eef_cotrain_dataset", "schema_version": 3, "task": self.spec.name, "split": self.split, "mode": self.mode, "ego_image_mode": self.ego_image_mode, "ego_selected_episode_ids": self.ego_selected_episode_ids, "real_selected_episode_ids": self.real_selected_episode_ids, "ego_variant": str(self.spec.ego_root), "real_dataset": str(self.spec.real_root), "correction": str(self.spec.correction_path), "real_split_source": self.split_source, "gripper_binary_threshold_raw": DEFAULT_GRIPPER_BINARY_THRESHOLD_RAW, "inactive_arm_policy": "canonical_identity_pose_with_per_element_loss_mask", "image_mask_counts": self.image_counts, "counts": self.counts, "episodes": self.provenance})
         return {"dataset": str(self.root), "episodes": len(self.episodes), "frames": self.global_index, "counts": self.counts}
 
 
@@ -425,12 +427,35 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
         if any(key not in info["features"] for key in VIDEO_KEYS):
             raise ValueError("source dataset must contain all three camera streams")
 
+    ego_tables: list[tuple[Path, pa.Table]] = []
+    ego_selected_episode_ids: list[int] = []
+    if "ego" in args.sources:
+        ego_tables = [(path, pq.read_table(path)) for path in episode_files(spec.ego_root)]
+        ego_tables.sort(key=lambda item: source_episode_index(item[1], item[0]))
+        if args.ego_count is not None:
+            if args.ego_count > len(ego_tables):
+                raise ValueError(
+                    f"--ego-count {args.ego_count} exceeds the {len(ego_tables)} available ego episodes "
+                    f"for {spec.name}"
+                )
+            ego_tables = ego_tables[:args.ego_count]
+        ego_selected_episode_ids = [source_episode_index(table, path) for path, table in ego_tables]
+
     real_tables: list[tuple[Path, pa.Table]] = []
+    real_selected_episode_ids: list[int] = []
     real_ids: set[int] = set()
     if "real" in args.sources:
         real_tables = [(path, pq.read_table(path)) for path in episode_files(spec.real_root)]
+        real_tables.sort(key=lambda item: source_episode_index(item[1], item[0]))
         all_real_ids = {source_episode_index(table, path) for path, table in real_tables}
-        if args.real_ids is not None:
+        if args.real_count is not None:
+            if args.real_count > len(real_tables):
+                raise ValueError(
+                    f"--real-count {args.real_count} exceeds the {len(real_tables)} available real episodes "
+                    f"for {spec.name}"
+                )
+            real_tables = real_tables[:args.real_count]
+        elif args.real_ids is not None:
             requested = set(args.real_ids)
             unknown = requested.difference(all_real_ids)
             if unknown:
@@ -439,6 +464,7 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
         real_ids = {source_episode_index(table, path) for path, table in real_tables}
         if not real_ids:
             raise ValueError(f"no real episodes selected for {spec.name}")
+        real_selected_episode_ids = [source_episode_index(table, path) for path, table in real_tables]
 
     if args.single_train_split:
         train_ids, split_source = real_ids, "all selected sources placed in train"
@@ -459,6 +485,8 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
             split,
             mode,
             args.ego_image_mode,
+            ego_selected_episode_ids,
+            real_selected_episode_ids,
             active_mask,
             split_source,
             args.overwrite,
@@ -468,7 +496,7 @@ def materialize(spec: TaskSpec, output_root: Path, args: argparse.Namespace, *, 
     fk, rng = ArxForwardKinematics(args.scene, args.calibration), np.random.default_rng(args.seed + sum(map(ord, spec.name)))
     sources = []
     if "ego" in args.sources:
-        sources.append(("ego", spec.ego_root, [(path, pq.read_table(path)) for path in episode_files(spec.ego_root)]))
+        sources.append(("ego", spec.ego_root, ego_tables))
     if "real" in args.sources:
         sources.append(("real", spec.real_root, real_tables))
     for source, root, tables in sources:
@@ -523,6 +551,8 @@ def main() -> None:
     parser.add_argument("--ego-experiment", default=None, help="Override the ego experiment directory for every selected task.")
     parser.add_argument("--ego-variant", default=None, help="Override the ego dataset variant directory for every selected task.")
     parser.add_argument("--sources", nargs="+", choices=("ego", "real"), default=("ego", "real"), help="Sources to include (default: ego real).")
+    parser.add_argument("--ego-count", type=int, default=None, help="Include the first N ego episodes ordered by source episode ID (default: all).")
+    parser.add_argument("--real-count", type=int, default=None, help="Include the first N real episodes ordered by source episode ID (default: all).")
     parser.add_argument("--real-ids", nargs="*", type=int, default=None, help="Optional real episode IDs to include; useful with --single-train-split.")
     parser.add_argument("--single-train-split", action="store_true", help="Write only a train repository and place every selected episode in it.")
     parser.add_argument("--dataset-label", default=None, help="Name inserted after task, e.g. real_all; avoids overwriting the default cotrain names.")
@@ -547,6 +577,16 @@ def main() -> None:
     args = parser.parse_args()
     if len(set(args.sources)) != len(args.sources):
         parser.error("--sources cannot contain duplicates")
+    if args.ego_count is not None and args.ego_count < 0:
+        parser.error("--ego-count must be non-negative")
+    if args.ego_count is not None and "ego" not in args.sources:
+        parser.error("--ego-count requires ego in --sources")
+    if args.real_count is not None and args.real_count < 0:
+        parser.error("--real-count must be non-negative")
+    if args.real_count is not None and "real" not in args.sources:
+        parser.error("--real-count requires real in --sources")
+    if args.real_count is not None and args.real_ids is not None:
+        parser.error("choose --real-count or --real-ids, not both")
     if args.dataset_label is not None and (not args.dataset_label or "/" in args.dataset_label):
         parser.error("--dataset-label must be a non-empty name without '/'")
     if (args.real_train_ids is not None or args.real_eval_ids is not None) and args.real_train_ratio is not None:

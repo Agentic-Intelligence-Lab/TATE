@@ -31,7 +31,7 @@ LEROBOT_ROOT="${LEROBOT_ROOT:-${TATE_ROOT}/outputs/lerobot}"
 ASSETS="${ASSETS:-${TATE_ROOT}/outputs/openpi_assets/0922}"
 CHECKPOINTS="${CHECKPOINTS:-${TATE_ROOT}/outputs/openpi_checkpoints/0922}"
 LOG_DIR="${LOG_DIR:-${TATE_ROOT}/outputs/logs}"
-BASE_WEIGHTS="${BASE_WEIGHTS:-/mnt/workspace/sunxiaoquan/models/pi05_base}"
+BASE_WEIGHTS="${BASE_WEIGHTS:-/mnt/data/sunxiaoquan/models/pi05_base}"
 
 TASK="${TASK:-stack_redcube_e1}"
 EGO_COUNT="${EGO_COUNT:-99}"

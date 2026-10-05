@@ -202,6 +202,15 @@ episode from that source. `--real-count` and `--real-ids` are mutually exclusive
 The selected ego and real IDs are saved in each output repository's
 `cotrain_provenance.json`.
 
+For a single built-in task, `--ego-dataset /path/to/packaged_ego_variant` and
+`--real-dataset /path/to/real_lerobot` override its configured source
+directories. The ego input is the output of the correction -> IK -> package
+pipeline: its corrected EEF is represented by the packaged 14-D retargeted
+joint trajectory and is also retained in the `tate.eef.*` columns. The real
+input contains measured 14-D joints. Both therefore have the joint schema
+expected by the final exporter. `--ego-dataset` is mutually exclusive with
+`--ego-experiment` and `--ego-variant`.
+
 ## 5. Compute normalization for every new train repository
 
 The normalization assets must come from the exact training repository, not its

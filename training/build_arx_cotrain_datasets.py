@@ -57,9 +57,12 @@ class TaskSpec:
     prompt: str
     active_sides: tuple[str, ...]
     real_root_override: Path | None = None
+    ego_root_override: Path | None = None
 
     @property
     def ego_root(self) -> Path:
+        if self.ego_root_override is not None:
+            return self.ego_root_override
         return REPO_ROOT / "outputs" / "experiments" / self.experiment / "datasets" / self.variant
 
     @property
@@ -547,7 +550,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", nargs="+", choices=sorted(TASKS), default=None)
     parser.add_argument("--task-name", default=None, help="Custom real-only task ID used in the output dataset name.")
-    parser.add_argument("--real-dataset", type=Path, default=None, help="Custom raw LeRobot root. Use with --task-name for a new real-only task.")
+    parser.add_argument(
+        "--ego-dataset",
+        type=Path,
+        default=None,
+        help="Override the packaged corrected+IK ego LeRobot root for one selected built-in task.",
+    )
+    parser.add_argument(
+        "--real-dataset",
+        type=Path,
+        default=None,
+        help="Override the measured-joint real LeRobot root for one selected built-in task, or use with --task-name for a custom real-only task.",
+    )
     parser.add_argument("--ego-experiment", default=None, help="Override the ego experiment directory for every selected task.")
     parser.add_argument("--ego-variant", default=None, help="Override the ego dataset variant directory for every selected task.")
     parser.add_argument("--sources", nargs="+", choices=("ego", "real"), default=("ego", "real"), help="Sources to include (default: ego real).")
@@ -581,10 +595,16 @@ def main() -> None:
         parser.error("--ego-count must be non-negative")
     if args.ego_count is not None and "ego" not in args.sources:
         parser.error("--ego-count requires ego in --sources")
+    if args.ego_dataset is not None and "ego" not in args.sources:
+        parser.error("--ego-dataset requires ego in --sources")
+    if args.ego_dataset is not None and (args.ego_experiment is not None or args.ego_variant is not None):
+        parser.error("--ego-dataset cannot be combined with --ego-experiment or --ego-variant")
     if args.real_count is not None and args.real_count < 0:
         parser.error("--real-count must be non-negative")
     if args.real_count is not None and "real" not in args.sources:
         parser.error("--real-count requires real in --sources")
+    if args.real_dataset is not None and "real" not in args.sources:
+        parser.error("--real-dataset requires real in --sources")
     if args.real_count is not None and args.real_ids is not None:
         parser.error("choose --real-count or --real-ids, not both")
     if args.dataset_label is not None and (not args.dataset_label or "/" in args.dataset_label):
@@ -595,23 +615,33 @@ def main() -> None:
     if np.any(probabilities < 0) or not np.isclose(probabilities.sum(), 1):
         parser.error("--real-camera-mask-probs must be non-negative and sum to one")
     args.output_root, args.scene, args.calibration = args.output_root.resolve(), args.scene.resolve(), args.calibration.resolve()
-    custom_values = (args.task_name, args.real_dataset)
-    if any(value is not None for value in custom_values):
-        if not all(value is not None for value in custom_values):
-            parser.error("provide both --task-name and --real-dataset for a custom task")
+    args.ego_dataset = args.ego_dataset.expanduser().resolve() if args.ego_dataset is not None else None
+    args.real_dataset = args.real_dataset.expanduser().resolve() if args.real_dataset is not None else None
+    if args.ego_dataset is not None and not args.ego_dataset.is_dir():
+        parser.error(f"--ego-dataset is not a directory: {args.ego_dataset}")
+    if args.real_dataset is not None and not args.real_dataset.is_dir():
+        parser.error(f"--real-dataset is not a directory: {args.real_dataset}")
+
+    if args.task_name is not None:
+        if args.real_dataset is None:
+            parser.error("--task-name requires --real-dataset")
         if args.tasks is not None:
             parser.error("--task-name/--real-dataset cannot be combined with --tasks")
+        if args.ego_dataset is not None:
+            parser.error("a custom real-only task cannot use --ego-dataset")
         if tuple(args.sources) != ("real",):
             parser.error("a custom task currently supports only --sources real")
         if not args.single_train_split:
             parser.error("a custom task requires --single-train-split")
         if not args.task_name or "/" in args.task_name:
             parser.error("--task-name must be a non-empty name without '/'")
-        real_root = args.real_dataset.expanduser().resolve()
-        prompt = dataset_single_task_prompt(real_root)
-        specs = [TaskSpec(args.task_name, "custom", "unused", prompt, ("right",), real_root)]
+        prompt = dataset_single_task_prompt(args.real_dataset)
+        specs = [TaskSpec(args.task_name, "custom", "unused", prompt, ("right",), args.real_dataset)]
     else:
-        specs = [TASKS[name] for name in (args.tasks or sorted(TASKS))]
+        selected_tasks = args.tasks or sorted(TASKS)
+        if (args.ego_dataset is not None or args.real_dataset is not None) and len(selected_tasks) != 1:
+            parser.error("--ego-dataset/--real-dataset overrides require exactly one --tasks value")
+        specs = [TASKS[name] for name in selected_tasks]
     result = []
     for mode in args.dataset_modes:
         for original_spec in specs:
@@ -621,6 +651,12 @@ def main() -> None:
                     spec,
                     experiment=args.ego_experiment or spec.experiment,
                     variant=args.ego_variant or spec.variant,
+                )
+            if args.ego_dataset is not None or args.real_dataset is not None:
+                spec = replace(
+                    spec,
+                    ego_root_override=args.ego_dataset or spec.ego_root_override,
+                    real_root_override=args.real_dataset or spec.real_root_override,
                 )
             result.extend(materialize(spec, args.output_root, args, camera_dropout=mode == "camera_dropout", probabilities=probabilities))
     print(json.dumps(result, indent=2))

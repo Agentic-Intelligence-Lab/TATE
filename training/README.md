@@ -258,9 +258,12 @@ optimizer steps are `floor(total_frames / batch_size) * epochs`. An explicit
 automatic offline eval loop; use its standalone evaluation script with an eval
 repository after checkpoint creation.
 
-Use `--wandb` only after `wandb login` has been completed in this same `.venv`.
-Without W&B, loss is printed to the terminal at `--log-interval` intervals but
-is not saved as a local loss-curve file.
+Use `--wandb` only after authentication is configured. For non-interactive DLC
+jobs, inject `WANDB_API_KEY` as a secret environment variable and set
+`WANDB_PROJECT`/`WANDB_MODE`; do not commit the key to a shell script. An
+alternative is `WANDB_MODE=offline`, or omit `--wandb` entirely. Without W&B,
+loss is printed to the terminal at `--log-interval` intervals but is not saved
+as a local loss-curve file.
 
 ### JAX / Flax variant
 

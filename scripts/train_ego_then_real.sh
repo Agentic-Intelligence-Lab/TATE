@@ -14,6 +14,8 @@
 #
 # Generated datasets and normalization assets are rebuilt by default. To reuse
 # existing ones, set BUILD_DATASETS=0 and/or COMPUTE_NORM=0.
+# W&B online mode requires WANDB_API_KEY to be injected by the DLC job. Use
+# USE_WANDB=0 to disable it or WANDB_MODE=offline for local-only W&B logs.
 
 set -Eeuo pipefail
 
@@ -45,15 +47,22 @@ REAL_SOURCE_DATASET="${REAL_SOURCE_DATASET:-}"
 EGO_IMAGE_MODE="${EGO_IMAGE_MODE:-head}"
 EGO_EPOCHS="${EGO_EPOCHS:-2}"
 REAL_EPOCHS="${REAL_EPOCHS:-2}"
-GLOBAL_BS="${GLOBAL_BS:-32}"
+PER_GPU_BS="${PER_GPU_BS:-8}"
+GLOBAL_BS="${GLOBAL_BS:-}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-1000}"
 LOG_INTERVAL="${LOG_INTERVAL:-20}"
-GPU_IDS="${GPU_IDS:-0,1,2,3}"
-NUM_GPUS="${NUM_GPUS:-4}"
+# Leave these empty to respect DLC's CUDA_VISIBLE_DEVICES allocation and detect
+# its visible GPU count automatically.
+GPU_IDS="${GPU_IDS:-${CUDA_VISIBLE_DEVICES:-}}"
+NUM_GPUS="${NUM_GPUS:-}"
 BUILD_DATASETS="${BUILD_DATASETS:-1}"
 COMPUTE_NORM="${COMPUTE_NORM:-1}"
 USE_WANDB="${USE_WANDB:-1}"
+WANDB_PROJECT="${WANDB_PROJECT:-lifego}"
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_DIR="${WANDB_DIR:-${TATE_ROOT}/wandb}"
+OVERWRITE_TRAIN_RUNS="${OVERWRITE_TRAIN_RUNS:-0}"
 
 # Task aliases e1/e2/e3 use v1/v2/v3 in the generated repository name.
 case "$TASK" in
@@ -72,10 +81,6 @@ REAL_DATASET="${LEROBOT_ROOT}/${REAL_REPO}"
 EGO_EXP_NAME="${EGO_EXP_NAME:-${OUTPUT_TASK}_ego_e${EGO_COUNT}_pi05}"
 REAL_EXP_NAME="${REAL_EXP_NAME:-${OUTPUT_TASK}_ego_e${EGO_COUNT}_then_real_r${REAL_COUNT}_pi05}"
 
-if (( NUM_GPUS <= 0 || GLOBAL_BS <= 0 || GLOBAL_BS % NUM_GPUS != 0 )); then
-  echo "ERROR: GLOBAL_BS (${GLOBAL_BS}) must be positive and divisible by NUM_GPUS (${NUM_GPUS})." >&2
-  exit 1
-fi
 if (( EGO_COUNT <= 0 || REAL_COUNT <= 0 || EGO_EPOCHS <= 0 || REAL_EPOCHS <= 0 )); then
   echo "ERROR: dataset counts and epoch counts must all be positive." >&2
   exit 1
@@ -88,13 +93,62 @@ if [[ ! -x "$PY" || ! -x "$TORCHRUN" ]]; then
   echo "ERROR: OpenPI Python or torchrun is missing under ${OPENPI_ROOT}/.venv/bin." >&2
   exit 1
 fi
+
+DETECTED_GPUS="$("$PY" -c 'import torch; print(torch.cuda.device_count())')"
+if (( DETECTED_GPUS < 1 )); then
+  echo "ERROR: no CUDA GPU is visible; check the DLC instance and GPU allocation." >&2
+  exit 1
+fi
+if [[ -n "$GPU_IDS" ]]; then
+  IFS=',' read -r -a selected_gpu_ids <<< "$GPU_IDS"
+  if [[ -z "$NUM_GPUS" ]]; then
+    NUM_GPUS="${#selected_gpu_ids[@]}"
+  elif (( NUM_GPUS != ${#selected_gpu_ids[@]} )); then
+    echo "ERROR: NUM_GPUS (${NUM_GPUS}) does not match GPU_IDS (${GPU_IDS})." >&2
+    exit 1
+  fi
+elif [[ -z "$NUM_GPUS" ]]; then
+  NUM_GPUS="$DETECTED_GPUS"
+elif (( NUM_GPUS > DETECTED_GPUS )); then
+  echo "ERROR: NUM_GPUS (${NUM_GPUS}) exceeds visible GPUs (${DETECTED_GPUS})." >&2
+  exit 1
+fi
+if [[ -z "$GLOBAL_BS" ]]; then
+  GLOBAL_BS=$((NUM_GPUS * PER_GPU_BS))
+fi
+if (( NUM_GPUS <= 0 || GLOBAL_BS <= 0 || GLOBAL_BS % NUM_GPUS != 0 )); then
+  echo "ERROR: GLOBAL_BS (${GLOBAL_BS}) must be positive and divisible by NUM_GPUS (${NUM_GPUS})." >&2
+  exit 1
+fi
 if [[ ! -f "${BASE_WEIGHTS}/model.safetensors" ]]; then
   echo "ERROR: base model is missing: ${BASE_WEIGHTS}/model.safetensors" >&2
   exit 1
 fi
+if [[ "$USE_WANDB" == "1" && "$WANDB_MODE" == "online" && -z "${WANDB_API_KEY:-}" ]]; then
+  echo "ERROR: USE_WANDB=1 and WANDB_MODE=online, but WANDB_API_KEY is not set." >&2
+  echo "Inject it through a DLC secret/environment variable, or run with USE_WANDB=0." >&2
+  exit 1
+fi
 
 mkdir -p "$ASSETS" "$CHECKPOINTS" "$LOG_DIR"
+if [[ "$USE_WANDB" == "1" ]]; then
+  mkdir -p "$WANDB_DIR"
+  export WANDB_PROJECT WANDB_MODE WANDB_DIR
+fi
 cd "$TATE_ROOT"
+
+echo "============================================================"
+echo "Two-stage training configuration"
+echo "============================================================"
+echo "Visible GPUs      : ${DETECTED_GPUS}"
+echo "Training processes: ${NUM_GPUS}"
+echo "CUDA device IDs   : ${GPU_IDS:-DLC allocation}"
+echo "Batch/GPU         : $((GLOBAL_BS / NUM_GPUS))"
+echo "Global batch      : ${GLOBAL_BS}"
+echo "Ego/real episodes : ${EGO_COUNT}/${REAL_COUNT}"
+echo "Ego/real epochs   : ${EGO_EPOCHS}/${REAL_EPOCHS}"
+echo "W&B               : $([[ "$USE_WANDB" == "1" ]] && printf '%s' "$WANDB_MODE" || printf '%s' disabled)"
+echo "============================================================"
 
 build_datasets() {
   local -a ego_source_args=()
@@ -158,13 +212,21 @@ train_four_gpu() {
   local initial_weights="$4"
   local epochs="$5"
   local -a wandb_args=()
+  local -a train_control_args=()
+  local -a device_env=()
 
   if [[ "$USE_WANDB" == "1" ]]; then
     wandb_args+=(--wandb)
   fi
+  if [[ "$OVERWRITE_TRAIN_RUNS" == "1" ]]; then
+    train_control_args+=(--overwrite)
+  fi
+  if [[ -n "$GPU_IDS" ]]; then
+    device_env+=(CUDA_VISIBLE_DEVICES="$GPU_IDS")
+  fi
 
   env \
-    CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+    "${device_env[@]}" \
     TATE_OPENPI_ROOT="$OPENPI_ROOT" \
     "$TORCHRUN" \
     --standalone \
@@ -183,6 +245,7 @@ train_four_gpu() {
     --save-interval "$SAVE_INTERVAL" \
     --log-interval "$LOG_INTERVAL" \
     --exp-name "$exp_name" \
+    "${train_control_args[@]}" \
     "${wandb_args[@]}"
 }
 

@@ -82,6 +82,8 @@ def fold_task_active() -> bool:
 
 class StartRequest(BaseModel):
     mode: str
+    arm_mode: str = "single"
+    prompt: str = "pick the cube and stack it on the blue plate"
     checkpoint_path: str = str(DEFAULT_CHECKPOINT_DIR)
     fps: float = Field(default=5.0, ge=1, le=50)
     n_action_steps: int = Field(default=50, ge=1, le=50)
@@ -114,6 +116,7 @@ class ProcessManager:
         self.logs: deque[str] = deque(maxlen=300)
         self.smoke_fingerprint: tuple[str, int, int] | None = None
         self.active_checkpoint: Path | None = None
+        self.active_arm_mode: str | None = None
         self.policy_process: subprocess.Popen[bytes] | None = None
         self.policy_checkpoint: Path | None = None
         self.policy_fingerprint: tuple[str, int, int] | None = None
@@ -145,14 +148,14 @@ class ProcessManager:
                 self._record_locked(clean)
                 if "READY_FOR_RUN" in clean and self.mode == "preparing":
                     self.mode = "awaiting_confirmation"
-                    self.last_result = "首个目标已通过检查，等待 RUN 确认"
+                    self.last_result = "等待 RUN 确认；执行前逐步检查目标"
                 elif "READY_FOR_START_POSE" in clean and self.mode == "preparing":
                     self.mode = "awaiting_start_pose"
-                    self.last_result = "已检查真实数据第 60 帧目标，等待 MOVE 确认"
+                    self.last_result = "已检查真机演示起点目标（帧号见日志），等待 MOVE 确认"
                 elif clean.startswith("MOVE accepted"):
                     self.mode = "moving_start_pose"
-                    self.last_result = "正直接移动到真实数据第 60 帧"
-                elif clean.startswith("START_POSE_REACHED"):
+                    self.last_result = "正在移动到真机演示起点（帧号见日志）"
+                elif clean.startswith("START_POSE_REACHED") or clean.startswith("BIMANUAL_START_POSE_REACHED"):
                     self.mode = "preparing"
                     self.last_result = "起点已到达，正在采集画面并推理首个目标"
                 elif clean.startswith("RUN accepted"):
@@ -160,13 +163,22 @@ class ProcessManager:
                     self.last_result = "真机测试运行中"
                 elif clean.startswith("HOLDING_POSITION"):
                     self.mode = "holding"
-                    self.last_result = "右臂保持在最终位置；可继续测试或复位"
+                    self.last_result = "机械臂保持在最终位置；可继续测试或复位"
+                elif clean.startswith("BIMANUAL_HOLD_FAILED"):
+                    self.mode = "holding"
+                    self.last_result = "保持指令失败，无法保证位置保持；请立即检查硬件，勿继续推理"
+                elif clean.startswith("BIMANUAL_PREPARING"):
+                    self.mode = "preparing"
+                    self.last_result = "正在重新检查目标，等待确认后继续测试"
+                elif clean.startswith("RESUME_CONFIG_REJECTED"):
+                    self.mode = "holding"
+                    self.last_result = clean
                 elif clean.startswith("RESET_ACCEPTED"):
                     self.mode = "resetting"
-                    self.last_result = "右臂正在回到零位"
+                    self.last_result = "机械臂正在回到零位"
                 elif clean.startswith("HOME_REACHED"):
                     self.mode = "holding"
-                    self.last_result = "右臂已回到零位并保持；可直接继续测试"
+                    self.last_result = "机械臂已回到零位并保持；可重新准备测试"
                 elif clean.startswith("RESUMED_FROM_HOLD"):
                     self.mode = "testing"
                     self.last_result = "已从最终位置继续测试"
@@ -317,9 +329,10 @@ class ProcessManager:
                     self.process = None
                     self.master_fd = None
                     self.active_checkpoint = None
+                    self.active_arm_mode = None
                     self._record_locked(f"TASK_PROCESS_EXIT code={code}")
 
-    def launch(self, command: list[str], mode: str, checkpoint_dir: Path | None = None, confirmation: str | None = None) -> None:
+    def launch(self, command: list[str], mode: str, checkpoint_dir: Path | None = None, confirmation: str | None = None, arm_mode: str | None = None) -> None:
         with self.lock:
             if self.process is not None and self.process.poll() is None:
                 raise HTTPException(409, "已有 TATE 任务在运行")
@@ -342,6 +355,7 @@ class ProcessManager:
             self.process = process
             self.master_fd = master_fd
             self.active_checkpoint = checkpoint_dir
+            self.active_arm_mode = arm_mode
             self.mode = mode
             self.started_at = time.time()
             self.last_result = "启动中"
@@ -365,7 +379,7 @@ class ProcessManager:
                 raise HTTPException(409, "当前没有等待 MOVE 确认的起点")
             os.write(self.master_fd, b"MOVE\n")
             self.mode = "moving_start_pose"
-            self.last_result = "已发送 MOVE，等待右臂到达起点"
+            self.last_result = "已发送 MOVE，等待机械臂到达起点"
 
     @staticmethod
     def _robot_pid(root_pid: int) -> int | None:
@@ -400,7 +414,7 @@ class ProcessManager:
                 self.last_result = "当前没有运行中的任务"
                 return
             self.mode = "stopping"
-            self.last_result = "正在停止，右臂将保持最终位置"
+            self.last_result = "正在停止推理，机械臂将保持当前位置"
             try:
                 robot_pid = self._robot_pid(process.pid)
                 if robot_pid is None:
@@ -410,10 +424,12 @@ class ProcessManager:
             except ProcessLookupError:
                 pass
 
-    def resume(self, *, fps: float, n_action_steps: int, gripper_threshold: float, tcp_offset_m: tuple[float, float, float], start_pose: bool) -> bool:
+    def resume(self, *, fps: float, n_action_steps: int, gripper_threshold: float, tcp_offset_m: tuple[float, float, float], start_pose: bool, prompt: str, arm_mode: str) -> bool:
         with self.lock:
             if self.mode != "holding" or self.process is None or self.process.poll() is not None or self.master_fd is None:
                 return False
+            if self.active_arm_mode != arm_mode:
+                raise HTTPException(409, "机械臂模式已改变；请先结束当前保持会话，再以新模式准备测试")
             robot_pid = self._robot_pid(self.process.pid)
             if robot_pid is None:
                 raise HTTPException(409, "机器人保持进程未就绪")
@@ -424,6 +440,7 @@ class ProcessManager:
                     "gripper_threshold": gripper_threshold,
                     "tcp_offset_m": tcp_offset_m,
                     "start_pose": start_pose,
+                    "prompt": prompt,
                 },
                 separators=(",", ":"),
             )
@@ -441,7 +458,7 @@ class ProcessManager:
                 raise HTTPException(409, "机器人保持进程未就绪")
             os.kill(robot_pid, signal.SIGHUP)
             self.mode = "resetting"
-            self.last_result = "已请求右臂回到零位"
+            self.last_result = "已请求机械臂回到零位"
             return True
 
     def snapshot(self, checkpoint_dir: Path = DEFAULT_CHECKPOINT_DIR) -> dict:
@@ -453,6 +470,7 @@ class ProcessManager:
                 "pid": self.process.pid if running else None,
                 "started_at": self.started_at,
                 "active_checkpoint": str(self.active_checkpoint) if self.active_checkpoint else None,
+                "active_arm_mode": self.active_arm_mode,
                 "result": self.last_result,
                 "smoke_ready": self.smoke_fingerprint is not None and self.smoke_fingerprint == model_fingerprint(checkpoint_dir),
                 "logs": list(self.logs),
@@ -611,6 +629,11 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
     selected = selected_checkpoint(req.checkpoint_path)
     if req.mode not in {"check", "smoke", "execute"}:
         raise HTTPException(400, "未知运行模式")
+    if req.arm_mode not in {"single", "bimanual"}:
+        raise HTTPException(400, "机械臂模式必须为 single 或 bimanual")
+    prompt = req.prompt.strip()
+    if not prompt or len(prompt) > 1000:
+        raise HTTPException(400, "prompt 必须为 1–1000 个字符")
     if not checkpoint_status(selected)["ready"]:
         raise HTTPException(409, "模型权重、归一化文件或 tokenizer 尚未齐全")
     if not POLICY_PYTHON.is_file() or not POLICY_READY_MARKER.is_file():
@@ -638,12 +661,16 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
         gripper_threshold=req.gripper_threshold,
         tcp_offset_m=tcp_offset,
         start_pose=req.start_pose,
+        prompt=prompt,
+        arm_mode=req.arm_mode,
     ):
         return {"ok": True, "mode": "testing"}
     command = [str(WRAPPER), "--execute"]
     mode = "preparing"
     if req.mode == "execute":
         command += [
+            "--arm-mode", req.arm_mode,
+            "--prompt", prompt,
             "--fps", str(req.fps),
             "--n-action-steps", str(req.n_action_steps),
             "--gripper-threshold", str(req.gripper_threshold),
@@ -651,7 +678,7 @@ def start(req: StartRequest, x_control_token: str | None = Header(default=None))
         command += ["--tcp-offset-m", *(str(value) for value in tcp_offset)]
         if req.start_pose:
             command.append("--start-pose")
-    manager.launch(command, mode, checkpoint_dir=selected)
+    manager.launch(command, mode, checkpoint_dir=selected, arm_mode=req.arm_mode)
     return {"ok": True, "mode": mode}
 
 

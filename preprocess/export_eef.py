@@ -1,4 +1,4 @@
-"""Export dual-arm EEF targets from a cached WiLoR reconstruction."""
+"""Export dual-arm EEF targets from a WiLoR or MINT hand cache."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from preprocess.PipelineIO import export_eef_from_cache
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hands", required=True, help="Sequence-level wilor_hands.json cache")
+    parser.add_argument("--hands", required=True, help="Sequence-level wilor_hands.json or mint_hands.json cache")
     parser.add_argument("--out", required=True, help="Output eef.json")
     parser.add_argument(
         "--camera-calibration",

@@ -505,11 +505,11 @@ def export_eef_from_cache(
     with open(cache_path, "r", encoding="utf-8") as stream:
         cache = json.load(stream)
     if (
-        cache.get("schema") != "tate.wilor_hands"
+        cache.get("schema") not in {"tate.wilor_hands", "tate.mint_hands"}
         or cache.get("schema_version") != WILOR_SCHEMA_VERSION
     ):
         raise ValueError(
-            f"Unsupported WiLoR cache schema: {cache.get('schema')!r} v{cache.get('schema_version')!r}"
+            f"Unsupported hand cache schema: {cache.get('schema')!r} v{cache.get('schema_version')!r}"
         )
     if cache.get("keypoint_order") != "aria_humanego_21":
         raise ValueError(
@@ -638,7 +638,9 @@ def export_eef_from_cache(
         "schema": "tate.dual_arm_eef",
         "schema_version": EEF_SCHEMA_VERSION,
         "source_video": cache.get("source_video"),
-        "source_wilor_cache": str(Path(cache_path)),
+        "source_hand_cache": str(Path(cache_path)),
+        "reconstruction": cache.get("reconstruction", {"backend": "wilor"}),
+        "source_wilor_cache": str(Path(cache_path)) if cache.get("schema") == "tate.wilor_hands" else None,
         "source_video_original": cache.get("source_video_original", cache.get("source_video")),
         "temporal_window": cache.get("temporal_window"),
         "arm_mode": arm_mode,

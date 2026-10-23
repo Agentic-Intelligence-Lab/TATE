@@ -1,0 +1,10 @@
+{
+  "schema": "tate.real_evaluation_split",
+  "schema_version": 1,
+  "task": "hanging",
+  "real_manifest_fingerprint": "4975b51469654e13d580dba9408308b517c258b0c06be65fd5c82c056317a974",
+  "calibration": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "eval": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+  "reserve": [],
+  "seed": 0
+}

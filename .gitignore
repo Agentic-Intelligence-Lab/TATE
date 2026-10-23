@@ -1,6 +1,5 @@
 # new
 wandb/
-cfg/preprocess/batch/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -226,3 +225,7 @@ thirdparty/
 DATA/
 assets/
 .vscode/
+
+# Generated experiment artifacts and local preview media
+output/
+camera_views_labeled_20261011_1705.mp4

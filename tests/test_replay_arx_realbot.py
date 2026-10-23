@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from real2sim.replay_arx_realbot import (
     SideTrajectory,
     as_abs,
     execute_trajectory,
+    load_trajectory,
     update_tracking_feedback,
 )
 
@@ -57,6 +59,28 @@ class RealbotReplayTests(unittest.TestCase):
             path.touch()
             with patch("pathlib.Path.cwd", return_value=Path(directory)):
                 self.assertEqual(as_abs("episode.parquet"), path.resolve())
+
+    def test_load_exported_bimanual_episode_json(self) -> None:
+        frames = []
+        for frame_index in range(2):
+            arms = {}
+            for side in ("left", "right"):
+                arms[side] = {
+                    "joint_position_rad": [0.1 * frame_index] * 6,
+                    "gripper": {"raw": -3.4 + frame_index},
+                }
+            frames.append({"timestamp_s": 3.0 + frame_index * 0.2, "arms": arms})
+        payload = {"robot": "arx5_2025_bimanual", "fps": 5, "frames": frames}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "episode_000000.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            trajectory = load_trajectory(path)
+
+        self.assertEqual(trajectory.source, "episode_json")
+        self.assertEqual(set(trajectory.sides), {"left", "right"})
+        np.testing.assert_allclose(trajectory.time_s, [0.0, 0.2])
+        np.testing.assert_allclose(trajectory.sides["left"].arm_qpos[1], [0.1] * 6)
+        np.testing.assert_allclose(trajectory.sides["right"].gripper_pos, [-3.4, -2.4])
 
     def test_tracking_feedback_requires_consecutive_bad_frames(self) -> None:
         arm = FakeArm(np.full(6, 0.3), 0.0)

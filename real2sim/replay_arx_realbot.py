@@ -8,6 +8,7 @@ Default mode is dry-run validation only. Real hardware commands require both
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -147,13 +148,83 @@ def load_parquet(path: Path) -> JointTrajectory:
     )
 
 
+def load_episode_json(path: Path) -> JointTrajectory:
+    """Load the bimanual episode JSON emitted by real_data/arx_lerobot_adapter."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid episode JSON: {path}") from exc
+
+    if record.get("robot") != "arx5_2025_bimanual":
+        raise RuntimeError(
+            "Episode JSON must declare robot='arx5_2025_bimanual'; "
+            f"got {record.get('robot')!r}"
+        )
+    frames = record.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise RuntimeError(f"Episode JSON has no frames: {path}")
+
+    try:
+        fps = float(record.get("fps", FPS))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Episode JSON fps must be numeric") from exc
+    if not np.isfinite(fps) or fps <= 0.0:
+        raise RuntimeError("Episode JSON fps must be positive")
+
+    sides: dict[str, SideTrajectory] = {}
+    time_s: list[float] = []
+    for side in SIDE_ORDER:
+        qpos: list[np.ndarray] = []
+        gripper: list[float] = []
+        for index, frame in enumerate(frames):
+            if not isinstance(frame, dict):
+                raise RuntimeError(f"Episode JSON frame {index} is not an object")
+            arms = frame.get("arms")
+            if not isinstance(arms, dict) or side not in arms:
+                raise RuntimeError(f"Episode JSON frame {index} is missing {side} arm")
+            arm = arms[side]
+            if not isinstance(arm, dict):
+                raise RuntimeError(f"Episode JSON frame {index} has invalid {side} arm")
+            try:
+                joints = np.asarray(arm["joint_position_rad"], dtype=np.float64).reshape(-1)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Episode JSON frame {index} has invalid {side}.joint_position_rad"
+                ) from exc
+            if joints.size != 6:
+                raise RuntimeError(
+                    f"Episode JSON frame {index} {side}.joint_position_rad must have 6 values"
+                )
+            try:
+                raw_gripper = float(arm["gripper"]["raw"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Episode JSON frame {index} has invalid {side}.gripper.raw"
+                ) from exc
+            qpos.append(joints)
+            gripper.append(raw_gripper)
+        sides[side] = SideTrajectory(np.stack(qpos), np.asarray(gripper, dtype=np.float64))
+
+    for index, frame in enumerate(frames):
+        try:
+            timestamp = float(frame.get("timestamp_s", index / fps))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Episode JSON frame {index} has invalid timestamp_s") from exc
+        time_s.append(timestamp)
+    timestamps = np.asarray(time_s, dtype=np.float64)
+    timestamps -= timestamps[0]
+    return JointTrajectory(time_s=timestamps, sides=sides, source="episode_json")
+
+
 def load_trajectory(path: Path) -> JointTrajectory:
     suffix = path.suffix.lower()
     if suffix == ".npz":
         return load_npz(path)
     if suffix == ".parquet":
         return load_parquet(path)
-    raise RuntimeError(f"Unsupported data format {suffix}; expected .npz or .parquet")
+    if suffix == ".json":
+        return load_episode_json(path)
+    raise RuntimeError(f"Unsupported data format {suffix}; expected .npz, .parquet, or .json")
 
 
 def validate_trajectory(traj: JointTrajectory) -> None:
@@ -522,7 +593,7 @@ def execute_trajectory(traj: JointTrajectory, command_frames: list[dict[str, tup
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default=str(DEFAULT_DATA), help="IK npz or real robot parquet")
+    parser.add_argument("--data", default=str(DEFAULT_DATA), help="IK npz, real-robot parquet, or exported episode JSON")
     parser.add_argument("--sdk-root", default=str(DEFAULT_SDK_ROOT))
     parser.add_argument("--left-can", default="can1")
     parser.add_argument("--right-can", default="can3")
